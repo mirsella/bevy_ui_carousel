@@ -1,0 +1,994 @@
+# LLM Agent Guide for Waykeepers
+
+This document provides guidance for Large Language Model (LLM) agents working on the Waykeepers codebase. Adhering to these guidelines will ensure that contributions are safe, effective, and align with the project's standards.
+
+## Project Overview
+
+Waykeepers is a multiplayer real-time strategy game. It is built in Rust using the Bevy game engine. The project has a client-server architecture and utilizes `bevy_replicon` for networking.
+
+The project is structured as a Cargo workspace with several crates, including:
+
+- `game_client`: The game client.
+- `game_server`: The game server.
+- `game_shared`: Code shared between the client and server.
+- `backend`: A web backend.
+
+## Core Principles for LLM Agents
+
+- **Preserve Existing Behavior**: Do not modify, refactor, or "improve" existing game logic, physics, or character stats unless explicitly instructed to do so. Your primary role is to assist with specific, targeted tasks.
+
+- **Frequently Verify Your Changes**: The codebase is complex. After any modification, run `cargo clippy --workspace --all-features` to ensure your changes have not introduced compilation errors. do it often, to work with up to date information.
+
+- **Stay True to Bevy's Patterns**: - All game logic should follow Bevy's Entity-Component-System (ECS) paradigm.
+
+- **Follow Existing Code Style**: Match the formatting, naming conventions, and module structure of the surrounding code.
+
+- Never use `git` command that will modify something, unless explicitly allowed. only use read only commands like log, diff. dont commit anything, dont push anything.
+
+- Never use `just`.
+
+- never run `cargo run`.
+
+- never run `cargo clean` or delete cache.
+
+- Never change the database, deploy anything, or migrate anything. you can only change code. only code.
+
+- Bevy is a rapidly developing engine. Use the migration guide to adapt to newer API, like they're used in the codebase.
+
+# Bevy Migration Guide: 0.13 to 0.16
+
+- **ECS Observers (`Event` Trait)**
+  - **Change:** `#[derive(Event)]` now automatically implements `Component`.
+  - **Migration:** Remove `#[derive(Component)]` if the type also has `#[derive(Event)]`.
+  - **0.16 Update:** `Event` trait no longer requires `Component`. Explicitly derive `Component` if needed.
+
+- **Gizmo Configuration**
+  - **Change:** `App::insert_gizmo_group()` is renamed to `App::insert_gizmo_config()`.
+  - **Migration:** Update method calls from `insert_gizmo_group` to `insert_gizmo_config`.
+  - **New:** `GizmoConfig` now has a `line_joins` field (default `None`, consider `Miter` or `Round`).
+  - **New:** `GizmoConfig` now has a `line_style` field (default `Solid`).
+
+- **UI `BackgroundColor` and `UiImage`**
+  - **Change:** `BackgroundColor` now renders a solid background. Tinting is via `UiImage::color`.
+  - **Old (Tinting):** `ButtonBundle { image: UiImage::new(my_texture), background_color: my_color_tint.into(), ..default() }`
+  - **New (Tinting):** `ButtonBundle { image: UiImage::new(my_texture).with_color(my_color_tint), ..default() }`
+  - **Migration:** Adjust UI code to use `UiImage::with_color` for tinting.
+  - **New Defaults:** `BackgroundColor` and `BorderColor` now default to transparent. Set to `Color::WHITE` for old behavior.
+  - **0.15 Update:** `BackgroundColor` no longer tints images in `ImageBundle` or `ButtonBundle`. `UiImage` default texture is now transparent white square. Use `UiImage::solid_color` for debug images.
+  - **0.16 Update:** `UiImage::new(image)` -> `ImageNode::new(image)`. `(UiImage::new(image), TextureAtlas { index, layout })` -> `UiImage::from_atlas_image(image, TextureAtlas { index, layout })`. `UiImage { texture: some_image, ..default() }` -> `UiImage { image: some_image, ..default() }`.
+
+- **UI System Renames/Splits**
+  - **Change:** `bevy_ui::RenderUiSystem::ExtractNode` split into `ExtractBackgrounds`, `ExtractImages`, `ExtractBorders`, `ExtractText`. `bevy_ui::extract_uinodes` split into `extract_uinode_background_colors` and `extract_uinode_images`. `bevy_ui::extract_text_uinodes` renamed to `extract_uinode_text`.
+  - **Migration:** Update system names in schedules.
+
+- **`NextState` Enum Conversion**
+  - **Old:** `let state = next_state.0.unwrap();`, `NextState(Some(S))`, `NextState(None)`.
+  - **New:** `let NextState::Pending(state) = next_state else { panic!("No pending next state!") };`, `NextState::Pending(S)`, `NextState::Unchanged`.
+  - **Migration:** Update `match` or `if let` statements to handle the `NextState` enum variants.
+
+- **`OnEnter` State Transition Timing**
+  - **Change:** `OnEnter` schedules run immediately upon state initialization, not after `Startup`.
+  - **Migration (Solution 1):** Move startup systems to a `Setup` state, then transition to desired initial state.
+    ```rust
+    #[derive(States, Default)]
+    enum AppState { #[default] Setup, InMenu, InGame }
+    fn transition_to_in_menu(mut app_state: ResMut<NextState<AppState>>) { app_state.set(AppState::InMenu); }
+    app.init_state::<AppState>()
+        .add_systems(OnEnter(AppState::Setup), initial_setup)
+        .add_system(Update, transition_to_in_menu.run_if(in_state(AppState::Setup)))
+        .add_systems(OnEnter(AppState::InMenu), relies_on_initial_setup);
+    ```
+  - **Migration (Solution 2):** Use sub-states for setup completion.
+    ```rust
+    #[derive(States, Default)] enum SetupState { #[default] SettingUp, SetupComplete }
+    #[derive(SubStates, Default)] #[source(SetupState = SetupState::SetupComplete)] enum AppState { #[default] InMenu, InGame }
+    fn finish_setup(mut app_state: ResMut<NextState<SetupState>>) { app_state.set(SetupState::SetupComplete); }
+    app.init_state::<SetupState>()
+        .add_sub_state::<AppState>()
+        .add_systems(OnEnter(AppState::InitialSetup), initial_setup)
+        .add_system(Update, finish_setup.run_if(in_state(AppState::Setup)))
+        .add_systems(OnEnter(AppState::InMenu), relies_on_initial_setup);
+    ```
+
+- **`GpuImage`, `TextureAtlasLayout` Dimensions**
+  - **Change:** Dimensions changed from `f32` (`Vec2`, `Rect`) to `u32` (`UVec2`, `URect`).
+  - **Migration:** Update types. Handle `f32` to `u32` conversion (discard decimals `as u32` or `round() as u32`).
+
+- **Animation Targeting (UUIDs)**
+  - **Change:** `AnimationClip` now uses UUIDs instead of hierarchical paths for bones. New `AnimationTarget` component needed on bones.
+  - **Migration:** Add `AnimationTarget` component to any bone you wish to animate. GlTF loader handles this automatically.
+
+- **`NoOpTypeIdHash` Renamed**
+  - **Change:** `NoOpTypeIdHash` and `NoOpTypeIdHasher` renamed to `NoOpHash` and `NoOpHasher`.
+  - **Migration:** Update type names.
+
+- **`System::run` Implies `apply_deferred`**
+  - **Old:** `system.run(world); system.apply_deferred(world);`
+  - **New:** `system.run(world);`
+  - **Migration:** Remove explicit calls to `system.apply_deferred(world)` after `system.run(world)`. (Note: `run_unsafe` still does not call `apply_deferred`).
+
+- **WGSL Shader Functions**
+  - **`affine_to_square`:** Renamed to `affine3_to_square`.
+    - **Old:** `#import bevy_render::maths::affine_to_square`
+    - **New:** `#import bevy_render::maths::affine3_to_square`
+  - **`random1D()`:** Replaced by `rand_f()`.
+    - **Old:** `bevy_pbr::utils::random1D()`
+    - **New:** `bevy_pbr::utils::rand_f()` (consider `rand_u()` or `rand_vec2f()`).
+  - **Mathematical constants and color conversions:** Moved from `bevy_pbr::utils` to `bevy_render::maths` and `bevy_render::color_operations`.
+    - **Old:** `#import bevy_pbr::utils::{PI, rgb_to_hsv}`
+    - **New:** `#import bevy_render::{maths::PI, color_operations::rgb_to_hsv}`
+  - **Migration:** Update WGSL import and function names.
+
+- **`Camera3dBundle::dither` Renamed**
+  - **Change:** Renamed to `deband_dither`.
+  - **Migration:** Update field access.
+
+- **Schedule and SystemSet Changes**
+  - **`UpdateAssets` Schedule:** Removed.
+    - **Old:** `add_systems(UpdateAssets, my_system)`
+    - **New:** `add_systems(PreUpdate, my_system)` (adjust ordering with `.before`/`.after` if needed).
+  - **`AssetEvents`:** Changed from `ScheduleLabel` to `SystemSet` within `First` schedule.
+    - **Old:** `add_systems(AssetEvents, my_system)`
+    - **New:** `add_systems(First, my_system.in_set(AssetEvents))`
+  - **0.16 Update:** `AssetEvents` has been moved into the `PostUpdate` schedule.
+
+- **`AnimationPlayer` Requires `AnimationGraph`**
+  - **Change:** `AnimationPlayer` needs a `Handle<AnimationGraph>`. `play_with_transition()` replaced by `AnimationTransitions` component.
+  - **Old:** `player.play(animations.add(animation))`
+  - **New:**
+    ```rust
+    let (graph, animation_index) = AnimationGraph::from_clip(animations.add(animation));
+    player.play(animation_index);
+    commands.spawn((player, graphs.add(graph), /* ... */));
+    ```
+  - **Migration:** Create an `AnimationGraph` asset, add clips to it, then `player.play(animation_index)`. For transitions, use `AnimationTransitions` component.
+  - **0.15 Update:** `AnimationClip` uses UUIDs instead of hierarchical paths based on the `Name` component to refer to bones. `AnimationTarget` component should be placed on each bone to specify its UUID and `AnimationPlayer`.
+  - **0.16 Update:** `Handle<AnimationGraph>` is no longer a component. Use `AnimationGraphHandle` which wraps the handle.
+
+- **Module Moves**
+  - **`AlphaMode`:** From `bevy::pbr` to `bevy::render::alpha`.
+    - **Old:** `use bevy::pbr::AlphaMode;`
+    - **New:** `use bevy::render::alpha::AlphaMode;`
+  - **`Direction2d`, `Direction3d`, `InvalidDirectionError`:** From `bevy::math::primitives` to `bevy::math`.
+    - **Old:** `use bevy::math::primitives::{Direction2d, Direction3d, InvalidDirectionError};`
+    - **New:** `use bevy::math::{Direction2d, Direction3d, InvalidDirectionError};`
+  - **`Command`, `CommandQueue`:** From `bevy::ecs::system` to `bevy::ecs::world`.
+    - **Old:** `use bevy::ecs::system::{Command, CommandQueue};`
+    - **New:** `use bevy::ecs::world::{Command, CommandQueue};`
+  - **`FloatOrd`:** From `bevy::utils` to `bevy::math`.
+    - **Old:** `use bevy::utils::FloatOrd;`
+    - **New:** `use bevy::math::FloatOrd;`
+  - **`bevy::utils::label`, `bevy::utils::intern`, `bevy::utils::define_label`:** Moved to `bevy::ecs`.
+  - **`AlphaMode` (in `ColorMaterial`):** From `bevy::pbr` to `bevy::render`. `ColorMaterial` now contains `AlphaMode2d`.
+    - **Migration:** To keep previous behaviour, use `AlphaMode::BLEND`. If opaque, use `AlphaMode::OPAQUE`.
+  - **`AlphaMode` (in PBR):** From `bevy::pbr` to `bevy::render::alpha`.
+  - **`Direction2d`, `Direction3d`:** Renamed to `Dir2` and `Dir3`.
+  - **`SrgbColorSpace`, `HslRepresentation`, `LchRepresentation`:** Removed in favor of specific color space structs and `From` implementations.
+    - **Migration:** `Srgba::gamma_function()` for gamma conversion. Use `Hsla::new(...).into()` for HSL/LCH to SRGBA conversions.
+  - **`bevy_diagnostic` `sysinfo_plugin`:** Now behind feature flag and not enabled by default for `bevy_diagnostic`.
+    - **Migration:** Add `features = ["sysinfo_plugin"]` to `bevy_diagnostic` or `bevy` in `Cargo.toml`.
+  - **`bevy::diagnostic` depends on `sysinfo`:** `sysinfo` is now behind the `sysinfo_plugin` feature flag for `bevy_diagnostic`, and not enabled by default for `bevy_diagnostic` (but is for `bevy` by default).
+    - **Migration:** If using `bevy_diagnostic` directly or `bevy` with `default-features = false`, enable `"sysinfo_plugin"` feature.
+  - **`bevy_pbr::utils` shader functions:** Moved to `bevy_render::maths` and `bevy_render::color_operations`.
+    - **Migration:** Update WGSL `#import` statements.
+  - **States moved to `bevy_state` crate:**
+    - **Change:** `NextState`, `OnEnter`, `OnExit`, `OnTransition`, `State`, `States`, `in_state` moved.
+    - **Old:** `bevy::ecs::schedule::...`
+    - **New:** `bevy::state::state::...`, `bevy::state::condition::in_state`.
+    - **Migration:** Update imports. If not using `DefaultPlugins`, add `StatesPlugin` manually.
+  - **`CameraOutputMode` `clear_color`:** Now takes `Option<LinearRgba>` instead of `Option<Color>`.
+    - **Migration:** Convert `Color` to `LinearRgba` using `color.into()`.
+  - **`ReflectSerialize` trait bounds:** Now requires `TypePath` and `FromReflect` (default with `#[derive(Reflect)]`).
+    - **Migration:** Remove `#[reflect(type_path = false)]` or `#[reflect(from_reflect = false)]`.
+  - **`#[reflect(Resource)]`:** Now requires `FromReflect`.
+    - **Migration:** Ensure `FromReflect` is implemented. Consider `#[reflect(FromWorld)]` for infallible variant.
+  - **`Color` Overhaul:** Enum now wraps specific color structs (`Srgba`, `Hsla`). `rgb` -> `srgb`, `rgba_linear` -> `linear_rgba`. Channel accessors (`r`, `set_r`) removed. `Color::hex` moved to `Srgba::hex`. Vector field arithmetic on `Color` removed (perform on `LinearRgba` instead). Alpha renamed `a` to `alpha`. CSS constants moved to `bevy::color::palettes::css`.
+    - **Migration:** Update match statements. Use `From`/`Into` for color space conversions. Access channels via struct fields after converting. Use `Srgba::hex()`. Perform arithmetic on `LinearRgba`. Update CSS constant imports (`use bevy::color::palettes::css::BLUE;`).
+  - **`WireframeMaterial`, `ExtractedUiNode`, etc. store `LinearRgba`:**
+    - **Migration:** Store `LinearRgba` instead of polymorphic `Color` in custom render data.
+  - **`ReflectBundle::insert`:** Now requires `&TypeRegistry`.
+  - **`Access::grow` removed:** Operations automatically grow capacity.
+  - **`MaterialPlugin` shadows:** Now has `shadows_enabled` property (default `true`).
+  - **`AssetReader::Reader` requires `AsyncSeek`:**
+    - **Migration:** Implement `AsyncSeek` for custom `Reader` types.
+  - **`async fn` in traits:** `AssetReader`, `AssetWriter`, `AssetLoader`, `AssetSaver`, `Process` now use `async fn`.
+    - **Migration:** Remove `Box::pin(async move { ... })` and `BoxedFuture` return types.
+  - **Object safety:** Traits using `async fn` are no longer object safe. Use `&dyn ErasedTrait` instead of `&dyn Trait`.
+  - **`WorldCell` removed:**
+    - **Migration:** Use `SystemState` for distinct resource fetches. `UnsafeWorldCell` if `unsafe` is acceptable.
+  - **`LogPlugin` panic handler:** Split into new `PanicHandlerPlugin` (added to `DefaultPlugins`).
+    - **Migration:** If not using `DefaultPlugins`, add `PanicHandlerPlugin` manually for WASM error messages.
+  - **`SpritePipelineKey::COLORED` removed:** Raw values for other flags changed.
+  - **`CubicCardinalSpline` behavior fixed:** Curve now passes through all control points.
+    - **Migration:** If relying on old behavior, shift `t` by 1 for `position(t + 1)` and/or omit extraneous endpoint tangents.
+  - **`Color` `f32` arithmetic removed:** Must operate on specific color space (`LinearRgba`). Alpha now included in multiplication/division.
+    - **Migration:** Convert to `LinearRgba` for arithmetic. Implement custom helper for old alpha-ignoring behavior. Clamp alpha manually if needed.
+  - **`check_visibility()` and `VisibleEntities` filters:** Now specify entity type (`WithMesh2d`, `WithMesh`, `WithLight`, `WithNode`).
+    - **Migration:** Update queries to use specific `With` filters. Add `check_visibility::<With<MyCustomRenderable>>` for custom types.
+  - **`ProcessResult` enum:** New `Ignore` variant.
+    - **Migration:** Update `match` statements.
+  - **`Handle` to `AssetId` conversion:** `Into` removed. Use `Handle::id()`.
+    - **Old:** `let id: AssetId<T> = handle.into();`
+    - **New:** `let id = handle.id();`
+  - **`Triangle2d` UV-mapping changed:** No longer dependent on absolute coordinates.
+    - **Migration:** Update code relying on `Triangle2d` UVs.
+  - **`NodeBundle` regression fixed:** `position_type: Absolute` workaround no longer needed for root nodes.
+  - **`AssetServer::load_state` errors:** `LoadState::Failed` now contains `AssetLoadError`.
+    - **Old:** `LoadState::Failed => eprintln!("Could not load asset!");`
+    - **New:** `LoadState::Failed(error) => eprintln!("Could not load asset! Error: {}", error);`
+    - **Migration:** Update `match`/`if let` statements. `Copy`, `PartialOrd`, `Ord` removed from `LoadState`.
+  - **`FloatOrd` `PartialOrd` fix:** Now matches `Ord` (never returns `None`).
+  - **`SceneSerializer`:** Takes `&TypeRegistry` instead of `&TypeRegistryArc`. `DynamicScene::serialize_ron()` renamed to `serialize()`.
+    - **Old:** `scene.serialize_ron(type_registry_arc).unwrap();`
+    - **New:** `scene.serialize(&type_registry_arc.read()).unwrap();`
+  - **`UntypedReflectDeserializer` renamed:** To `ReflectDeserializer`.
+    - **Old:** `UntypedReflectDeserializer::new(&registry)`
+    - **New:** `ReflectDeserializer::new(&registry)`
+  - **`Point` trait replaced by `VectorSpace`:**
+    - **Migration:** Replace `Point` with `VectorSpace`. `VectorSpace` requires `ZERO` constant, `Div<f32, Output = Self>`, `Neg`. No longer requires `Add<f32>`, `Sum`, `PartialEq`.
+  - **`WinitWindows::get_window_entity`:** Returns `None` if window is closed.
+  - **`glam` update:** From 0.25 to 0.27. `fract()` behavior changed (`self - self.trunc()` vs `self - self.floor()`).
+    - **Migration:** Use `fract_gl()` for old behavior. Consult `glam` changelog.
+  - **`MeshVertexBufferLayout` interned:** Now `MeshVertexBufferLayoutRef` (contains `Arc`).
+    - **Migration:** Update types to `MeshVertexBufferLayoutRef`.
+  - **`SpriteSheetBundle`, `AtlasImageBundle` deprecated:**
+    - **Old (`SpriteSheetBundle`):**
+      ```rust
+      commands.spawn(SpriteSheetBundle { texture, atlas: TextureAtlas { layout, ..default() }, ..default() });
+      ```
+    - **New (`SpriteSheetBundle`):**
+      ```rust
+      commands.spawn((SpriteBundle { texture, ..default() }, TextureAtlas { layout, ..default() }));
+      ```
+    - **Migration:** Replace bundles with `SpriteBundle`/`ImageBundle` and `TextureAtlas` component.
+  - **External type reflection:** Many `std`/`glam` types no longer registered by default.
+    - **Migration:** Manually `app.register_type::<DMat3>();` as needed.
+  - **`DeterministicRenderingConfig` removed:** `stable_sort_z_fighting` no longer needed.
+  - **`RenderMaterials`, `RenderMaterials2d`, `RenderUiMaterials` replaced by `RenderAssets` resource:**
+    - **Migration:** Use `RenderAssets::get` for `PreparedMaterial<T>`. Implement `RenderAsset` for destination types (`impl RenderAsset for GpuImage { type SourceAsset = Image; ... }`).
+  - **System stepping disabled by default:**
+    - **Migration:** Enable `bevy_debug_stepping` feature in `Cargo.toml` if needed.
+  - **`close_on_esc` system removed:**
+    - **Migration:** Copy system provided in release notes if needed, or use OS keybinds.
+  - **`RAY_QUERY`, `RAY_TRACING_ACCELERATION_STRUCTURE` `wgpu` features disabled by default:**
+    - **Migration:** Re-enable via `WgpuSettings::features`.
+  - **`ReceivedCharacter` deprecated:** Use `KeyboardInput` instead.
+    - **Old:** `EventReader<ReceivedCharacter>`
+    - **New:** `EventReader<KeyboardInput>` (check `event.state.is_pressed()` and `match event.logical_key`).
+    - **0.15 Update:** Still deprecated.
+    - **0.16 Update:** Fully removed.
+  - **`PhaseItem` split:** Into `BinnedPhaseItem` and `SortedPhaseItem`.
+    - **Migration:** Choose new type. `SortedPhaseItem` for quick migration (fewest code changes). `BinnedPhaseItem` for performance if sorting not required. `Query` for `RenderPhase<Transparent2d>` becomes `ResMut<ViewSortedRenderPhases<Transparent2d>>`.
+  - **`QueryState` changes:** No longer stores `Access<ArchetypeComponentId>`. `archetype_component_access` removed. `new_archetype`/`update_archetype_component_access` require `&mut Access<ArchetypeComponentId>`. `matched_tables`/`matched_archetypes` return iterators.
+    - **Migration:** Pass `Access` as argument. Use iterator combinators or `collect()`.
+  - **`ReflectBundle::insert`:** Requires `&TypeRegistry`.
+  - **`GpuArrayBufferIndex::index`:** Now `u32` instead of `NonMaxU32`.
+  - **`Plane3d` finite, `InfinitePlane3d` new:**
+    - **Old:** `let plane = Plane3d::new(Vec3::Y);`
+    - **New:** `let plane = Plane3d { normal: Dir3::Y, half_size: Vec2::new(10., 10.), };` or `let plane = InfinitePlane3d::new(Vec3::Y);`
+  - **`QueryState::new_archetype`, `SystemParam::new_archetype` unsafe:**
+    - **Migration:** Wrap usage in `unsafe` block.
+  - **`AppExit` is an enum:** `AppExit::Success`, `AppExit::Error(NonZeroU8)`. `App::run()` returns `AppExit`.
+    - **Migration:** Update `EventWriter::send` calls and `EventReader` `match` statements. `main` function can now return `AppExit`.
+  - **WGSL `pbr_lighting` functions:** Clearcoat parameters added. `R` reflection vector parameter removed.
+  - **Dynamic plugins deprecated:**
+    - **Migration:** Remove usage. Consider scripting/hot reloading libraries (Bevy Assets, Stabby) or copy Bevy's code locally.
+    - **0.15 Update:** Still deprecated.
+    - **0.16 Update:** Fully removed.
+  - **`Aabb3d`, `BoundingSphere`, `RayCast3d` use `Vec3A`:**
+    - **Migration:** Convert `Vec3` to `Vec3A` using `into()`.
+  - **`SystemId::entity()`:** Use `system_id.entity()` for `Entity` of one-shot system.
+  - **`ColorGrading` expanded:** `gamma`/`pre_saturation` (now `saturation`) are per-section. `post_saturation`/`exposure` moved to `global` field.
+    - **Migration:** Update field access and loops for sections.
+  - **`LogPlugin` `custom_layer`:** Replaces `update_subscriber`.
+    - **Migration:** Provide `Option<BoxedLayer>` closure.
+  - **`AssetMetaCheck`:** Moved from resource to `AssetPlugin` field.
+    - **Old:** `insert_resource(AssetMetaCheck::Never)`
+    - **New:** `DefaultPlugins.set(AssetPlugin { meta_check: AssetMetaCheck::Never, ..default() })`
+  - **`Result` reflection:** Now `ReflectKind::Enum`. Requires `FromReflect` for `T` and `E`.
+  - **`wgpu` 0.20, `naga` 0.20, `naga_oil` 0.14 update:**
+    - **Migration:** Update versions in `Cargo.toml` if manually specified. Timestamps inside encoders disallowed on WebGPU.
+  - **`BufferVec` renamed to `RawBufferVec`:** New `BufferVec<T>` requires `ShaderType` from `encase`.
+  - **States moved to `bevy_state` crate:**
+    - **Migration:** Add `bevy_state` feature/crate as dependency. Update imports. Manually add `StatesPlugin` if not using `DefaultPlugins`.
+  - **Windows close a frame later:**
+    - **Migration:** Adjust custom exit logic if it relied on same-frame exit.
+  - **`TextureAtlasBuilder` methods:** Most return `&mut Self`, `finish()` renamed to `build()`.
+    - **Migration:** Chain methods and call `build()`.
+  - **Gizmo builder methods:** `primitive_2d(CIRCLE)` etc. now return builders. `SphereBuilder::circle_segments()` renamed to `resolution()`.
+    - **Migration:** Access builder methods.
+  - **`GlobalTransform` directional axis methods:** Return `Dir3` instead of `Vec3`.
+    - **Migration:** Convert to `Vec3` if mutable access needed, or use `Dir3::X` constants.
+  - **`RenderLayers` total limit removed:** `TOTAL_LAYERS` constant and `all()` constructor removed. `Copy` trait removed.
+    - **Migration:** Compute active layers at runtime. Use `.clone()`.
+  - **`WorldQuery`, `QueryState` `&World` removed:** Now takes `&Components`.
+    - **Migration:** Use `World::components()`. Update `WorldQuery` `get_state()` impls.
+  - **Emissive color/camera exposure scaling:** Emissive values scaled down for better visibility with bloom.
+    - **Migration:** Re-adjust emissive colors (much lower values). Consider `StandardMaterial::emissive_exposure_weight`.
+  - **App Lifecycle and Event Loop Changes:** `UserEvent` -> `WakeUp`. `UpdateMode` to `Continuous`/`Reactive` with properties. `ApplicationLifecycle` -> `AppLifecycle`.
+    - **Migration:** Update names and how update modes are configured.
+  - **Shape mesh builders `build()` method trait:** `MeshBuilder` trait added.
+    - **Migration:** Import `MeshBuilder` trait if not using prelude.
+  - **`CameraOutputMode::Write` clear color config:** Takes `ClearColorConfig` instead of `LoadOp<Color>`.
+    - **Migration:** Map `Clear(color)` to `Custom(color)`, `Load` to `None`. `Default` is new.
+  - **Gizmo `segments()` renamed to `resolution()`:**
+    - **Migration:** Update method calls.
+  - **`Rect::inset()` renamed to `inflate()`:**
+    - **Migration:** Update method calls.
+  - **`extract_default_ui_camera_view()` fix:** No longer added twice for 2D/3D cameras.
+    - **Migration:** No user code change required.
+  - **`LoadContext` builder struct:** `load_direct` methods merged into a builder.
+    - **Old:** `load_context.load_direct(path);`
+    - **New:** `load_context.loader().direct().untyped().load(path);`
+    - **Migration:** Update asset loading calls to use the `loader()` builder pattern.
+  - **Matrix naming convention `x_from_y`:** Many matrix names and fields renamed.
+    - **Migration:** Update all affected field names and method calls (e.g., `projection_matrix` -> `clip_from_view`).
+  - **`Gizmos::primitive_2d()`/`3d()` takes reference:**
+    - **Old:** `gizmos.primitive_2d(polygon, ...);`
+    - **New:** `gizmos.primitive_2d(&polygon, ...);`
+    - **Migration:** Pass primitives by reference to avoid cloning.
+  - **`Plane::subdivisions`:** Now on `Plane3d::mesh().subdivisions()`.
+    - **Old:** `Plane { subdivisions: 10, ..default() };`
+    - **New:** `Plane3d::default().mesh().subdivisions(10);`
+  - **`StateTransitionEvent` field names:** `before` -> `exited`, `after` -> `entered`.
+    - **Migration:** Update field access.
+  - **`TextStyle` default font size:** Increased from 12px to 24px.
+    - **Migration:** Set `TextStyle::font_size` explicitly to 12.0 for old size.
+  - **`TorusMeshBuilder` no longer `Copy`:**
+    - **Migration:** Call `clone()` manually where implicitly copied.
+  - **`apply_state_transition` system not public:**
+    - **Migration:** Create custom schedule and insert it after `StateTransition` using `MainScheduleOrder`.
+  - **`State` moved to `bevy::state`:** `App::init_state` is now an extension trait (`AppExtStates`).
+    - **Old:** `App::new().init_state::<MyState>()`
+    - **New:** `use bevy::state::app::AppExtStates as _; App::new().init_state::<MyState>()`
+  - **PBR shader light names:** `point_lights` -> `clusterable_objects`, `PointLight` -> `ClusterableObject`, etc.
+  - **Touchpad events renamed to gestures:** `bevy::input::touchpad` -> `bevy::input::gestures`, `TouchpadMagnify` -> `PinchGesture`, `TouchpadRotate` -> `RotationGesture`.
+  - **`WinitEvent::KeyboardFocusLost` added:**
+    - **Migration:** Update `match` statements for `WinitEvent`.
+  - **`Mesh::merge()` takes `&Mesh`:**
+    - **Migration:** Pass mesh by reference.
+  - **`App` and `SubApp` separation:** `App` no longer contains `SubApp`. `SubApp::new()` is now used. `App::world` is now `App::world()` and `App::world_mut()`. Sub app getters return `SubApp`. `App::runner` and `App::main_schedule_label` are private (`SubApp::update_schedule`).
+    - **Migration:** Use `SubApp::new()`, `set_extract()`. Update `world` accessors. Update sub app getters. Adjust runner functions. Implement extension traits for `SubApp` if applicable.
+  - **`Text2dBounds` replaced by `TextBounds`:** `TextSettings` removed. `subpixel_glyph_atlas` removed. Text rendering requires `CosmicBuffer`.
+    - **Migration:** Use `TextBounds` (accepts `Option`). Divide old text sizes by 1.2.
+  - **`AssetPath::from_static`:** New constructor for performance.
+    - **Migration:** Change `AssetPath::from("...")` to `AssetPath::from_static("...")` for constants.
+  - **`SceneInstanceReady` event changed:** Now `SceneInstanceReady { id: InstanceId, parent: Option<Entity> }`.
+  - **Android `GameActivity` default:** Replaces `NativeActivity`. `cargo-apk` replaced with `cargo-ndk`.
+    - **Migration:** `rustup target add aarch64-linux-android`. `cargo install cargo-ndk`. Build shared objects with `cargo ndk` before Gradle.
+  - **`AsBindGroup` derive can fail:** `PrepareAssetError` has `AsBindGroupError`.
+    - **Migration:** Handle `PrepareAssetError::AsBindGroupError` in exhaustive matches.
+  - **Gamepad input overhaul:** Gamepads are entities. `Gamepads` resource removed. `GamepadSettings` is a component. Methods on `Axis<GamepadButton>` etc. are now methods on the `Gamepad` component.
+    - **Old:** `gamepads: Res<Gamepads>`, `button_inputs: Res<ButtonInput<GamepadButton>>`, `axes: Res<Axis<GamepadAxis>>`, `button_inputs.just_pressed(GamepadButton::new(gamepad, South))`.
+    - **New:** `gamepads: Query<&Gamepad>`, `gamepad.just_pressed(GamepadButton::South)`.
+    - **Migration:** Query for `Gamepad` component, use its methods for input.
+  - **`Table` uses `ThinColumn`:**
+    - **Migration:** Use `ThinColumn`'s limited API, e.g., `ThinColumn::get_added_ticks_slice`.
+  - **Reflect `Set` variants:** New `Set` variants on enums might need consideration.
+  - **`TaskPoolThreadAssignmentPolicy`:** New `on_thread_spawn` and `on_thread_destroy` fields.
+    - **Migration:** Default to `None`.
+  - **`wgpu` 0.20 update (continued):** Naga capabilities detected, timestamps inside encoders disallowed on WebGPU. Numeric built-ins in `const` contexts. `u64`/`i64` supported with `SHADER_INT64` feature.
+  - **`RenderCommandResult::Failure`:** Use `RenderCommandResult::Skip` instead.
+  - **Reflected types `Typed` trait:** All active fields of reflected types must implement `Typed`. Custom dynamic types need `MaybeTyped`.
+  - **`ColorAttachment::new()` `ClearColorConfig`:** Now takes `ClearColorConfig`.
+  - **SSAO algorithm change:** From GTAO to VBAO. `constant_object_thickness` added to `ScreenSpaceAmbientOcclusion`. `Eq`/`Hash` removed.
+  - **`ExtractedUiNode` fields:** `atlas_size` -> `atlas_scaling`.
+  - **`ComputedTextureSlices` field removed:** `image_size` removed.
+  - **`WindowMode` variants:** Now take `MonitorSelection`.
+    - **Migration:** Use `MonitorSelection::Primary` for old behavior.
+  - **GlTF node children access:** Now requires accessing `GltfNode` asset from `Assets<GltfNode>`.
+    - **Old:** `first_child.name` (directly from GltfNode).
+    - **New:** `gltf_nodes.get(first_child_handle).unwrap().name`.
+  - **Image format feature flags:** `exr`, `hdr`, `basis-universal`, `png`, `dds`, `tga`, `jpeg`, `bmp`, `ktx2`, `webp`, `pnm` are now feature-gated for `bevy_image`.
+    - **Migration:** Add features to `Cargo.toml` if using these formats directly.
+  - **Text atlas APIs:** `glyph_id`/`subpixel_offset` replaced by `PlacedGlyph`.
+  - **`DynamicTextureAtlasBuilder::add_texture`:** Now takes `&mut Image`.
+  - **`EntityMapper`:** `mappings()` stub implementation. `dyn EntityMapper` -> `dyn DynEntityMapper`.
+  - **`AssetServer::add_async` custom error:** Can now return custom error. `AssetLoadError` has new arm.
+  - **`Color::linear` renamed:** To `Color::to_linear`.
+  - **`DebugName`:** Use `Display` (`{}`) instead of `Debug` (`{:?}`). For `String`, use `ShortName(name).to_string()`.
+  - **Run condition `and_then`/`or_else`:** Replaced by `and`/`or`.
+  - **`ManualEventReader` deprecated:** Use `EventCursor`. `Events::get_reader` replaced by `Events::get_cursor`. `Events` resource mutation -> `EventMutator`.
+  - **`RegularPolygon` sides:** Now `u32` instead of `usize`.
+  - **`Scene::write_to_world_with` signature:** Now requires `&mut EntityHashMap`.
+    - **Old:** `scene.write_to_world_with(world, &registry)`
+    - **New:** `scene.write_to_world_with(world, &mut entity_map, &registry)`
+  - **`SceneInstanceReady` to observer:**
+    - **Old:** `fn ready_system(ready_events: EventReader<'_, '_, SceneInstanceReady>)`
+    - **New:** `commands.observe(|trigger: Trigger<SceneInstanceReady>| { ... });` or `commands.entity(entity).observe(|trigger: Trigger<SceneInstanceReady>| { ... });`
+  - **Emissive materials with deferred rendering:** Behavior changed to match forward rendering.
+    - **Migration:** Tweak emissive values.
+  - **`IntoSystemConfigs::chain_ignore_deferred`:** Returns `SystemSetConfig`.
+  - **Gizmo/primitive mesh builder resolutions:** Now `u32` instead of `usize`.
+  - **`World::inspect_entity`:** Returns `Iterator` instead of `Vec`.
+    - **Migration:** Call `.collect<Vec<_>>()` if `Vec` is needed.
+  - **Manual `Event` implementation:** Add `Traverse = TraverseNone` and `AUTO_PROPAGATE = false`.
+  - **`Trigger::new`:** Has `propagation: &mut Propagation` field.
+  - **`ObserverRunner`:** Takes `&mut Propagation`.
+  - **`TerminalCtrlCHandlerPlugin`:** Call `gracefully_exit` from custom handler.
+  - **`BackgroundColor` tinting (re-emphasis):** See earlier notes on `BackgroundColor` and `UiImage`.
+  - **`changed_by` in ECS functions:** Added for change detection with `track_change_detection`. Use `Location::caller()`.
+  - **`pbr_anisotropy_texture` feature:** Add if using that texture in standard materials.
+  - **`SystemBuilder` API change:** From `SystemBuilder::new(&mut world).local::<u64>().build(system)` to `(ParamBuilder, LocalBuilder(10)).build_state(&mut world).build_system(system)`.
+  - **`SpotLight`, `CascadesVisibleEntities`, `CubemapVisibleEntities`:** Now use `VisibleMeshEntities`.
+  - **`AssetReader::read` opaque type:** Now returns `impl Reader + 'a` instead of `Box<Reader<'a>>`. `bevy::asset::io::Reader` is a trait.
+    - **Migration:** Update trait implementations. Explicitly implement `bevy::asset::io::Reader` for types.
+  - **`accesskit::Role::StaticText` renamed:** To `Role::Label`.
+  - **`FogVolume` for volumetric fog:** Now required.
+    - **Migration:** Place a large `FogVolume` surrounding the scene.
+  - **`Parallel::drain()` type parameter removed:**
+    - **Old:** `for v in parallel.drain::<u8>()`
+    - **New:** `for v in parallel.drain()`
+  - **`AsyncSeek` -> `AsyncSeekForward`:**
+    - **Migration:** Replace `AsyncSeek` with `AsyncSeekForward` in asset reader implementations.
+  - **`EventLoopProxy` renamed:** To `EventLoopProxyWrapper` and is `Send`.
+    - **Old:** `event_loop: NonSend<EventLoopProxy<MyEvent>>`
+    - **New:** `event_loop: Res<EventLoopProxy<MyEvent>>`
+  - **`bevy_core::name::DebugName`:** Renamed to `bevy_core::name::NameOrEntity`.
+  - **`UiSystem::Outline` ordering:** Now strictly after `UiSystem::Layout`.
+  - **`DynamicArray::from_vec`:** Renamed to `DynamicArray::from_iter`.
+  - **`GpuMesh` renamed to `RenderMesh`:** Buffers handled by `MeshAllocator`.
+    - **Migration:** Use `RenderMesh`. Access vertex/index data via `MeshAllocator::mesh_vertex_slice`/`mesh_index_slice`.
+  - **`Skybox` struct:** New `rotation` field.
+    - **Migration:** Include `..Default::default()` or `rotation` in initialization.
+  - **`Msaa` configuration:** No longer global resource, specified on each camera.
+    - **Migration:** Remove global `Msaa` resource. Add `Msaa` component to cameras if non-default setting needed.
+  - **`CursorIcon` and `Cursor` types:** `CursorIcon` is now a component (not `Window` field). `Cursor` renamed to `CursorOptions`. `CursorIcon` to `SystemCursorIcon`.
+    - **Migration:** Insert `CursorIcon` component to window entity. Rename `cursor` field to `cursor_options`. Rename `CursorIcon` to `SystemCursorIcon`.
+  - **`PluginGroupBuilder` generic removal:** Removed second generic from `add_before`/`add_after`.
+    - **Old:** `add_before::<WindowPlugin, _>(FooPlugin)`
+    - **New:** `add_before::<WindowPlugin>(FooPlugin)`
+  - **`EnvironmentMapLight` struct:** New `rotation` field.
+    - **Migration:** Include `..default()` or `rotation` in initialization.
+  - **`bevy_window` default feature removed:**
+    - **Migration:** Remove `features = ["default"]` for `bevy_window` if `default-features = false`.
+  - **`ConeMeshBuilder` `new` method:** Addition of `new` method to the 3D primitive Cone struct.
+  - **`GltfAssetLabel::Skin` renamed:** To `GltfAssetLabel::InverseBindMatrices`.
+  - **`AnyOf<()>` and `Or<()>` behavior changed:** Match no archetypes.
+    - **Migration:** Replace with `()` if they were intended to match all archetypes.
+  - **`trigger_observers` parameter:** Now `&[ComponentId]` instead of `impl Iterator<Item=ComponentId>`.
+    - **Migration:** Convert iterator to slice (`.collect::<Vec<_>>().as_slice()`).
+  - **`CASNode` typo fix:** Renamed to `CasNode` (and related types).
+    - **Migration:** Fix typo in names.
+  - **Cubic splines `to_curve` fallible:** Returns `Result`. `CubicGenerator`/`RationalGenerator` need `Error` type. `CubicCurve`/`RationalCurve` fields private, use `from_segments`.
+    - **Migration:** Handle `Result` from `to_curve`. Update custom generator implementations. Use `from_segments` for curve construction.
+  - **Transform propagation for missing `GlobalTransform`:** No longer performed.
+    - **Migration:** Add `GlobalTransform::default()` to intermediate parent entities.
+  - **`is_playing_animation` renamed:** To `animation_is_playing`.
+  - **`Mesh::attributes` iterator:** Now returns `MeshVertexAttribute` (not `Id`). Access `MeshVertexAttribute.id` for ID.
+  - **Run conditions simplification:** Many no longer require `()`.
+    - **Old:** `run_if(run_once())`
+    - **New:** `run_if(run_once)`
+  - **`World::increment_change_tick` `&mut self`:** Now requires mutable world access.
+    - **Migration:** Use `world.as_unsafe_world_cell_readonly().increment_change_tick()` if only immutable access.
+  - **`Bounded2d`/`3d` `Isometry` parameters:** Now take `Isometry2d`/`3d`.
+    - **Old:** `aabb_2d(my_translation, my_rotation)`
+    - **New:** `aabb_2d(Isometry2d::new(my_translation, my_rotation))`
+    - **Migration:** Convert separate translation/rotation to `Isometry` (or `Transform::to_isometry()`).
+  - **Dynamic plugins fully removed:**
+    - **Migration:** See 0.14 notes on alternatives.
+  - **`AnimationPlayer::start` restarts, `play` doesn't reset weight:**
+    - **Migration:** Adjust logic based on desired animation behavior.
+  - **`Access::get_conflicts` enum:** Now returns `AccessConflict` enum.
+  - **`CameraUpdateSystem` ordering:** Explicitly ordered before `UiSystem::Prepare`.
+  - **`QueryState::transmute` methods:** Now take `impl Into<UnsafeWorldCell>`.
+  - **Gizmo `grid` methods:** `segment_length`, `segment_count`, `axis_count` replaced by `cell_count`, `spacing`.
+  - **`AsBindGroup` `storage` attribute:** References `Handle<Storage>` asset. `Vec` -> assets.
+  - **Gizmo method signatures `Isometry`:**
+    - **2D:** `(pos, rot_angle)` -> `Isometry2d::new(pos, Rot2::radians(rot_angle))`. `(pos)` -> `Isometry2d::from_translation(pos)`.
+    - **3D:** `(pos, rot)` -> `Isometry3d::new(pos, rot)`. `(pos)` -> `Isometry3d::from_translation(pos)`.
+  - **`WorldQuery` `shrink_fetch`:** New method to implement for manual `WorldQuery`.
+  - **`Wireframe2dConfig::default_color` and `Wireframe2dColor::color`:** Types are now `Color` instead of `Srgba`.
+    - **Migration:** Use `.into()` for conversion.
+  - **`arc_2d` parameters changed:**
+    - **Old:** `arc_2d(pos, angle, arc_angle, radius, color)`
+    - **New:** `arc_2d(Isometry2d::new(pos, Rot2::radians(angle + arc_angle * 0.5)), arc_angle, radius, color)` (adjust `angle` for previous behavior).
+  - **`World::clear_entities`:** Now part of `RenderSet::PostCleanup`.
+  - **`QueryFilter` unsafe trait:** Add `unsafe` keyword to `impl`.
+  - **`Style` `direction` removed:** Field and `Direction` enum deleted.
+  - **`ScreenshotManager` removed:**
+    - **Migration:** Spawn `Screenshot` entity with target, observe `ScreenshotCaptured` event.
+  - **Type info `item_type_id`/`path_table` removed:** Use `item_ty().id()` / `item_ty().path_table()`.
+  - **`bevy/wgpu_trace` features removed:** WGPU tracing enabled during `RenderPlugin` creation.
+    - **Migration:** Remove feature flags from `Cargo.toml`. Follow debugging docs.
+  - **`bevy_mod_picking` to `bevy_picking`:**
+    - **Migration:** `On<T>` component -> `.observe(|trigger: Trigger<T>|)`. Add `MeshPickingPlugin` if needed. Check `bevy_picking::event::pointer_events` docs. `PointerCancel` -> `Pointer<Canceled>`. `InputMove`/`InputPress` merged into `PointerInput`. Picking events via observers only.
+  - **`bevy_winit::WinitEvent` moved:** To `bevy_window::WindowEvent`.
+  - **`run_fixed_main_schedule` no longer public:**
+    - **Migration:** Use `RunFixedMainLoopSystem::FixedMainLoop` or `BeforeFixedMainLoop`/`AfterFixedMainLoop` system sets.
+  - **`GizmoMeshConfig` removed:**
+    - **Migration:** Remove references to `GizmoMeshConfig`.
+  - **`AsBindGroup` custom `SystemParam`:** Allows specifying a `SystemParam` for bind group creation.
+  - **`Commands::register_one_shot_system` renamed:** To `register_system`.
+  - **`TrackedRenderPass::set_vertex_buffer`:** Now updates vertex buffers even if same buffer/offset but size changed.
+  - **`Drop` renamed:** To `DragDrop` in `bevy::picking::events`.
+  - **`GlobalTransform` and `TransformBundle`:** Replace with `Transform` component alone.
+  - **`bevy_utils::CowArc` moved:** To `atomicow` crate.
+  - **`Camera` world/viewport methods return `Result`:** `world_to_viewport`, `viewport_to_world`, etc.
+    - **Migration:** Call `.ok()` or handle `Result` directly.
+  - **Animation graph `animgraph.ron` format change:** `clip` fields now `AnimationNodeType` enum.
+  - **Rendering components renamed:** `AutoExposureSettings` -> `AutoExposure`, `BloomSettings` -> `Bloom`, etc.
+    - **Migration:** Update component names.
+  - **`bevy::utils::{EntityHash, EntityHasher, EntityHashMap, EntityHashSet}`:** Moved to `bevy::ecs::entity`.
+  - **`OrthographicProjection` constructors:** `..default()` -> `..OrthographicProjection::default_2d()` or `..OrthographicProjection::default_3d()`.
+  - **`OrthographicProjection` `scale`:** Replaced by `scaling_mode` (multiplier).
+    - **Migration:** Adjust `scaling_mode` value accordingly.
+  - **`FilteredEntityRef::components` renamed:** To `FilteredEntityRef::accessed_components` (and `FilteredEntityMut`).
+  - **`LoadAndSave<L, S>` replaced:** With `LoadTransformAndSave<L, IdentityAssetTransformer<<L as AssetLoader>::Asset>, S>`.
+  - **`ReflectSerializer` fields private:** Use `ReflectSerializer::new()`. Other serializer types/traits no longer public.
+  - **`Reflect` supertrait `DynamicTyped`:** Manual `Reflect` implementations need `Typed` trait.
+  - **`ReceivedCharacter` removed:** See 0.14 notes for migration to `KeyboardInput`.
+  - **Observer filter type removed:** `Observer<A, B>` -> `Observer`.
+  - **`Node` `logical_rect`/`physical_rect` removed:** Use `Rect::from_center_size` with translation and node size. `ExtractedUiNode` border/border_radius types changed.
+  - **`DynamicScene` format changed:** Uses custom serialize impls (e.g., `viewport_origin: (0.5, 0.5)` instead of `(x: 0.5, y: 0.5)`).
+  - **`SystemId<I, O>` changed:** To `SystemId<In<I>, O>`. Applies to `System`, `IntoSystem`, `Condition`. `In<Trigger<E, B>>` is invalid, use `Trigger<E, B>`.
+  - **`EntityCommands::push_children` renamed:** To `add_children`. `PushChild` -> `AddChild`, etc.
+  - **`DynamicSceneBuilder` filters/accesses:** `allow_all`/`deny_all` now set resource accesses. New `allow_all_components`/`deny_all_components`.
+    - **Migration:** Use component-specific methods for old behavior. Renamed `with_filter` -> `with_component_filter`, `allow` -> `allow_component`, `deny` -> `deny_component`.
+  - **`Commands::add` and `Commands::push` replaced by `Commands::queue`:** `ChildBuilder::add_command` renamed to `queue_command`.
+  - **`RecursiveDependencyLoadState::Failed`:** Now stores error info.
+  - **`ReflectKind::Value` -> `ReflectKind::Opaque`:** And related renames (`ValueInfo` -> `OpaqueInfo`, `impl_reflect_value!` -> `impl_reflect_opaque!`). `#[reflect_value]` -> `#[reflect(opaque)]`.
+  - **`World::get_resource_ref` returns `Ref<T>`:** (Not `Res<T>`).
+    - **Migration:** Adjust type annotations for `Ref<T>`.
+  - **`bevy_utils` features:** If `default-features = false`, may need to enable `std` or `alloc`.
+  - **Animation `Keyframes` trait:** Now extensible trait. `Keyframes::Translation(...)` -> `Box::new(TranslationKeyframes(...))`.
+    - **Migration:** Update animation keyframe creation to use boxed trait objects.
+  - **`DebugName` for formatting:** Use `ShortName(name).to_string()` for `String` value.
+  - **Retained Rendering (Render World Changes):** Entities no longer despawned automatically. `TemporaryRenderEntity` component for temporary entities. `Entity` IDs in main and render world not guaranteed to line up. `MainEntity` wrapper for main world entities in render world. `RenderEntity` for render world entity IDs.
+    - **Extraction:** `Extract<Query<(Entity, ...)>>` becomes `Extract<Query<(RenderEntity, ...)>>`. `commands.get_or_spawn(entity)` becomes `commands.entity(render_entity)`.
+    - **Lookup:** `Query<(MainEntity, &Clusters)>` for main world entities from render world.
+    - **General Advice:** Use `RenderEntity` for render world entities, `MainEntity` for main world entities.
+  - **`bevy_utils::ShortName` -> `bevy_reflect::ShortName`:** Update imports.
+  - **UI Children Iteration:** Use `bevy_ui::UiChildren` to skip ghost nodes. `Without<Parent>` might not query all root nodes; use `bevy_ui::UiRootNodes`.
+  - **`TextureAtlasBuilder` signature change:** `build()` now returns `(atlas_layout, atlas_sources, image)`.
+    - **Migration:** Update destructuring. Use `TextureAtlasSources::get_texture_index` or `handle` for lookups.
+  - **`Text` component changes:** `font_smoothing: FontSmoothing` property added. `FontSizeKey` -> `FontAtlasKey`. `FontAtlasSet` methods take `font_smoothing`.
+    - **Migration:** Add `font_smoothing` or `..default()` to `TextFont` instantiations. Update `FontAtlas` methods.
+  - **`bevy_utils::ShortName` -> `disqualified::ShortName`:** Update imports.
+  - **`EulerRot` reflection:** Updated to align with `glam` 0.29.
+  - **`reflect::Map`, `List`, `Set` `&mut self`:** Methods now take `&mut self` instead of `Box<Self>`.
+  - **`IntoSystem::pipe`, `map` return types:** Now `IntoPipeSystem`, `IntoAdapterSystem` (don't implement `System`).
+  - **`ReflectMapEntities`:** Call `map_entities` on values before inserting into world. Implementors remove `mappings` method.
+  - **`AnimationClip` and `VariableCurve` overhaul:** `VariableCurve` replaced with curve constructors.
+    - **Old:** `VariableCurve { keyframes: Keyframes::Rotation(...), ... }`
+    - **New:** `AnimatableKeyframeCurve::new(...).map(RotationCurve)`
+    - **Migration:** Rewrite animation curve definitions. `AnimationClip::add_variable_curve_to_target` if adding `VariableCurve` directly.
+  - **`QueryEntityError` lifetime:** Now has a lifetime.
+    - **Migration:** Convert to custom error if storing.
+  - **`World::init_component` renamed:** To `register_component` (and `_with_descriptor`). `init_bundle` -> `register_bundle`. Applies to `Components` as well.
+  - **`RationalCurve::domain` renamed:** To `RationalCurve::length`. `domain()` now returns `Interval`.
+  - **`VisibilityBundle` deprecated:** Replace with `Visibility` component.
+  - **`ReflectDeserializer` custom processor:** Takes `ReflectDeserializerProcessor` as generic `P`.
+  - **`Return::Unit` removed:** Use `Return::unit()`.
+  - **`SpriteBundle` deprecated:** Use `Sprite` component with constructors `Sprite::from_image`, `Sprite::from_atlas_image`, `Sprite::from_color`.
+    - **WARNING**: `Handle<Image>` and `TextureAtlas` as components on sprites no longer work for rendering.
+  - **`LoadContext::loader` / `NestedLoader` naming changes:** `untyped` -> `with_unknown_type`, `with_asset_type` -> `with_static_type`, `with_asset_type_id` -> `with_dynamic_type`, `direct` -> `immediate`.
+  - **Mesh/material handles as components:** Now must be wrapped in `Mesh2d`/`MeshMaterial2d` or `Mesh3d`/`MeshMaterial3d`.
+    - **Bundles Deprecated:** `MaterialMesh2dBundle`, `MaterialMeshBundle`, `PbrBundle`.
+    - **Migration:** Spawn `(Mesh2d(mesh_handle), MeshMaterial2d(material_handle))`.
+  - **`RunSystemOnce::run_system_once` returns `Result<Out>`:**
+    - **Migration:** Handle `Result`.
+  - **`AssetLoader`, `AssetSaver`, `Process` elided lifetimes:**
+    - **Migration:** Remove named lifetimes from `impl`s.
+  - **`World::flush_commands` private:** Use `World::flush()`.
+  - **Light bundles deprecated:** `PointLightBundle`, `SpotLightBundle`, `DirectionalLightBundle`.
+    - **Migration:** Insert `PointLight`, `SpotLight`, `DirectionalLight` components directly.
+  - **`Style` `OverflowClipMargin`:** New field, three constructors (`content_box`, `padding_box`, `border_box`), `with_margin`.
+    - **Migration:** Default is `content_box`. For old behavior, use `border_box`.
+  - **`FogVolumeBundle` deprecated:** Replace with `Visibility` component.
+  - **Motion/SSR/SSAO bundles deprecated:** `MotionBlurBundle`, `TemporalAntiAliasBundle`, etc.
+    - **Migration:** Insert `MotionBlur`, `TemporalAntiAliasing`, etc. components directly.
+  - **Audio bundles deprecated:** `AudioSourceBundle`, `AudioBundle`, `PitchBundle`.
+    - **Migration:** Replace with `AudioPlayer` component.
+  - **Scene handles as components:** Now wrapped in `SceneRoot`/`DynamicSceneRoot`.
+    - **Bundles Deprecated:** `SceneBundle`, `DynamicSceneBundle`.
+    - **Migration:** Spawn `(SceneRoot(scene_handle), Transform::default())`.
+  - **`SyncComponentPlugin`:** For `ExtractedSprite` and retained rendering.
+  - **`BreakLineOn` renamed:** To `LineBreak`. `linebreak_behavior` to `linebreak`.
+  - **`android_activity` reexport moved:** From `bevy::winit` to `bevy::window`.
+  - **Image formats feature-gated:** `avif`, `ff`, `gif`, `ico`, `tiff` now require explicit features. `qoi` added.
+    - **Migration:** Enable features in `Cargo.toml`. `bevy_render` image format features moved to `bevy_image`.
+  - **Animation graph evaluation order:** Changed to be more intuitive.
+  - **Text API overhaul (`cosmic-text`):**
+    - **`TextBundle` removed:** Use `Text` component. `TextLayout`, `TextFont`, `TextColor` are required components.
+    - **Text sections as entities:** Use `TextUiReader`/`TextUiWriter` to access text spans by index.
+      - **Old:** `text.sections[1].value = format_time(...)`
+      - **New:** `*writer.text(entity, 1) = format_time(...)`
+    - **Bundle fields to components:** `TextNodeFlags` for `TextBundle` fields. `TextBounds` and `Anchor` for `Text2dBundle`.
+  - **`World` entity fetch methods return `Result`:** `EntityRef::get_by_id`, `World::get_entity`, `World::get_entity_mut`, etc.
+    - **Migration:** Use `.ok()` or handle `Result` directly. Type inference might need explicit types in closures.
+    - **Deprecated methods:** `World::many_entities`, `many_entities_mut`, `get_many_entities`, etc. replaced by `World::entity::<[Entity; N]>`, `get_entity::<[Entity; N]>`.
+  - **`EntityWorldMut::observe_entity` renamed:** To `observe`.
+  - **Tuple struct serialization:** Single-field tuple structs serialize as newtype struct (e.g., `["3"]` to `"3"` for JSON).
+  - **Animation graph `animgraph.ron` format (additive blending):** `clip` fields now `AnimationNodeType` enum.
+  - **Camera bundles deprecated:** `Camera2dBundle`, `Camera3dBundle`.
+    - **Migration:** Insert `Camera2d`, `Camera3d` components directly.
+  - **`CursorIcon` and `CustomCursor` moved:** From `bevy::render::view::cursor` to `bevy::winit`. `custom_cursor` feature added.
+  - **`Commands::entity(...)`/`World::entity(...)` usage:** Use for existing entities. `spawn(...)` for new ones. `get_entity` for checking existence.
+  - **`Events::oldest_id` renamed:** To `Events::oldest_event_count`.
+  - **`Quat: Animatable` implementation fix:** Update code relying on additive quaternion blending if behavior relied on old (incorrect) implementation.
+  - **`bevy_render::mesh::morph::inherit_weights` moved:** To `bevy_render::mesh::inherit_weights`.
+  - **`Mesh::compute_aabb` moved:** To `MeshAabb` trait.
+    - **Migration:** `use bevy::render::mesh::MeshAabb;`.
+  - **Pointer bundle API changed:**
+    - **Old:** `commands.insert(PointerBundle::new(PointerId::Mouse).with_location(location));`
+    - **New:** `commands.insert((PointerId::Mouse, PointerLocation::new(location)));`
+  - **`Ray2d::new` and `Ray3d::new`:** Now take `Dir2`/`Dir3` instead of `Vec2`/`Vec3`.
+  - **`ReflectionProbeBundle` deprecated:** Replace with `LightProbe` and `EnvironmentMapLight` components.
+  - **`Handle<AnimationGraph>` component removal:** Now `AnimationGraphHandle` component.
+  - **Observer methods renamed:** `App::observe` -> `add_observer`, `World::observe` -> `add_observer`, `Commands::observe` -> `add_observer`, `EntityWorldMut::observe_entity` -> `observe`.
+  - **`Handle` no longer `Component`:** Custom `Handle` components must be wrapped in semantically meaningful types. `Handle<MeshletMesh>` -> `MeshletMesh3d`.
+  - **`ImageLoader` initialization:** No longer `init_asset_loader`. Use `app.register_asset_loader(ImageLoader::new(...))`.
+    - **Meta File:** `loader: "bevy_render::texture::image_loader::ImageLoader"` -> `loader: "bevy_image::image_loader::ImageLoader"`.
+  - **MacOS `Window` settings:** New fields for movable background, fullsize content, shadow, titlebar options.
+    - **Migration:** `Window::default()` retains old behavior.
+  - **`SpatialBundle` deprecated:** Replace with `Transform` and `Visibility` components.
+    - **Old:** `commands.spawn(SpatialBundle::default());`
+    - **New:** `commands.spawn((Transform::default(), Visibility::default()));`
+  - **`Entity::PLACEHOLDER` Debug/Display:** Returns `PLACEHOLDER` string.
+  - **`TextStyle` renamed:** To `TextFont`. `color` field moved to `TextColor` component.
+  - **Text bundles removed:** `TextBundle`/`Text2dBundle` -> `Text`/`Text2d` (with required components).
+  - **`AssetLoadError`/`LoadState` equality comparisons removed:**
+    - **Migration:** Use `is_loaded()` or `matches!` macro for checking states/errors.
+  - **`NodeBundle` replaced by `Node`:** `Style` fields moved to `Node`. Computed properties on `ComputedNode`.
+    - **Migration:** `NodeBundle` -> `Node`. `Style` -> `Node`. `Node` (for computed props) -> `ComputedNode`.
+  - **`ExtractComponent` returning `None`:** Component removed from render world.
+  - **`Time`/`Timer`/`Stopwatch` method renames:** `paused` -> `is_paused`, `elapsed_seconds` -> `elapsed_secs`.
+  - **`ScalingMode` refactor:** `WindowSize` no longer stores float (acts as 1.0). `FixedVertical`/`FixedHorizontal` use named fields.
+    - **Migration:** Divide camera scale by previous `WindowSize` value.
+  - **AVIF image support removed:**
+    - **Migration:** Use other formats or unofficial plugins.
+  - **Asset processor `dependants` -> `dependents`:** And related fields/methods.
+  - **`MAX_UNIFORM_BUFFER_CLUSTERABLE_OBJECTS` reduced:** From 256 to 204 for WebGL2.
+  - **`UiImage` and `TextureAtlas` usage:** `UiImage::from_atlas_image` constructor added. `texture` field renamed to `image`.
+  - **`OrderIndependentTransparencySettings`:** New `alpha_threshold` field (default `0.5`).
+    - **Migration:** Add `..default()` or explicitly set `alpha_threshold` when initializing.
+  - **`UiSurface::get_layout` return type:** Now returns `(Layout, taffy::Size<f32>)`.
+    - **Migration:** Access `taffy::Layout` using `.0`.
+  - **`Entities::remove` return value:** If not needed, discard it.
+  - **`bevy_image` reexports from `bevy::render::texture`:** Removed.
+    - **Migration:** Import directly from `bevy::image`.
+  - **`Gamepad` fields public:** Delegate methods removed (e.g., `Gamepad::just_pressed`).
+    - **Migration:** Access fields directly and call methods on them (e.g., `gamepad.buttons.just_pressed(...)`). `GamepadInfo` removed.
+  - **`accesskit` dependency moved:** From `bevy_a11y` to direct dependency.
+    - **Migration:** Add `accesskit = "0.17"` to `Cargo.toml`. Update `use` statements.
+  - **`ComponentTicks` direct field access:** `last_changed_tick`/`added_tick` methods removed.
+    - **Migration:** Access fields directly.
+  - **`UiImage::new(image)` -> `ImageNode::new(image)`:**
+    - **Migration:** Update constructor calls.
+  - **`ComputePipelineDescriptor`/`RenderPipelineDescriptor`:** `zero_initialize_workgroup_memory` field added.
+    - **Migration:** Set to `false` for 0.14 behavior, `true` for 0.13.
+  - **`Rot2::angle_between` deprecated:** Use `Rot2::angle_to`.
+  - **Pointer interaction events (`PressDirection`, `PointerAction`):** `Down` -> `Pressed`, `Up` -> `Released`. Events in `events.rs` (`Down`, `Up`, `Click`) renamed to `Pressed`, `Released`, `Click`. `DragStart`/`DragEnd` behavior adjusted.
+    - **Migration:** Update enum variants and event usage.
+  - **`Access::try_iter_component_access()`:** Replaces `component_reads_and_writes()`, `component_reads()`, `component_writes()`. Returns `Result`.
+    - **Migration:** Handle `Result`. Use `filter_map` with `ComponentAccessKind` to replicate old behavior.
+  - **`RenderAssets::prepare_asset`:** Now takes `AssetId` parameter.
+  - **Bin keys `wgpu` -> Bevy indices:** `Opaque3dBinKey::lightmap_slab` (lightweight identifier).
+    - **Migration:** Use `MaterialBindGroupAllocator`.
+  - **`Component::Mutability` associated type:** Manual `Component` implementations need `type Mutability = Mutable;`.
+  - **`Mut<T>` -> `OccupiedEntry<T>`:** For entity entry API when mutable access is available.
+    - **Migration:** Add `.into_mut()` to get `Mut<T>`.
+  - **`ComputedNode` physical coordinates:** Fields and methods now use physical coordinates. New `inverse_scale_factor` field.
+    - **Migration:** Adjust coordinate usage. Multiply by `inverse_scale_factor` for logical values.
+  - **Sprite picking transparency:** Now ignores transparent regions (alpha <= 0.1). Configurable via `SpriteBackendSettings`.
+  - **Cubic splines `IntoIterator`:** Now `IntoIterator` in places where `Into<Vec<..>>` was used.
+    - **Migration:** If custom input types, ensure they implement `IntoIterator` or convert to `Vec`.
+  - **`LayoutContext` `min`/`max` fields removed:** Call `min_element`/`max_element` on `LayoutContent::physical_size`.
+  - **`Entities::flush_and_reserve_invalid_assuming_no_entities()` removed:** Use `Entities::reserve_entities()` and `Entities::flush_as_invalid()`.
+  - **`VisibilityRange` `use_aabb` field:** Added. Default to `false`.
+  - **`UiPlugin`/`SpritePlugin` picking fields:** Now contain `add_picking` field if picking backends are enabled.
+  - **`RenderCreation::Manual` fields wrapped:** In `RenderResources` struct.
+  - **Observer/Hook ordering swapped for `on_replace()` and `on_remove()`:** Observers run before hooks.
+  - **Bevy UI multiple shadows:** `BoxShadow` component is now `BoxShadow::new(...)` wrapping `Vec<ShadowStyle>`. `UiBoxShadowSamples` renamed to `BoxShadowSamples`.
+    - **Migration:** Use `BoxShadow::new` constructor.
+  - **`World::run_system_with_input` renamed:** To `World::run_system_with`. `run_system_once_with` params swapped.
+  - **`EntityBorrow` for custom iterators:** Custom `Borrow<Entity>` types need to implement `EntityBorrow`.
+  - **`ArgList::push` replaced by `with`:** `push_arg` -> `with_arg`, etc.
+  - **`PartialReflect::serializable` removed:** Use `ReflectSerialize` or custom type data.
+  - **Fallible systems executor changes:** `BoxedSystem<(), ()>` -> `ScheduleSystem` (returns `Result`). Executors obey `SystemParamValidationError`. Error handled by `default_error_handler`.
+  - **`TextFont` `line_height` field:** Added.
+    - **Migration:** Add `line_height` or `..default()` to `TextFont` instantiations.
+  - **`AsBindGroup::unprepared_bind_group` no panic:** Return `AsBindGroupError::CreateBindGroupDirectly`.
+  - **`apply_deferred()` is a system type:** Not a function.
+    - **Migration:** Use `ApplyDeferred` type. Remove manual calls.
+  - **`Opaque3dBinKey::lightmap_image` -> `lightmap_slab`:**
+  - **`bevy_dev_tools::ui_debug_overlay` replaced:** With new `bevy_ui`-based overlay. `UiDebugOptions` moved to `bevy_ui`.
+    - **Migration:** Remove `DebugUiPlugin`, enable `bevy_ui_debug` feature flag. Update `UiDebugOptions` import.
+  - **`CachedSystemId` stores `Entity`:** Instead of `SystemId`. `new()` method.
+    - **Old:** `CachedSystemId::<S::System>::(id)`
+    - **New:** `CachedSystemId::<S>::new(id)`
+  - **`RayCastSettings` renamed:** To `MeshRayCastSettings`.
+  - **`Trigger::entity()` renamed:** To `Trigger::target()`. Same for `ObserverTrigger::entity`.
+  - **`EntityCloner` in component clone handlers:** Changed to `&mut ComponentCloneCtx`. `EntityCloneHandler` now a struct.
+  - **Bevy Remote Protocol `bevy/query`:** Skips missing components by default (`strict` field).
+  - **`BorderRect` `square`/`rectangle` renamed:** To `all`/`axes`.
+  - **Indirect drawing (GPU culling) enabled by default:** `GpuCulling` component removed. `NoIndirectDrawing` component added to camera to disable.
+  - **Light/Irradiance Volume `affects_lightmapped_meshes`:** New field.
+  - **`RenderTarget::Image` takes `ImageRenderTarget`:**
+    - **Migration:** Use `handle.into()` to construct `ImageRenderTarget`.
+  - **`Assets::asset_events()` system private:** Use `AssetEvents` system set.
+  - **`check_visibility` no `QueryFilter` param:** And no manual add to app. `VisibilityClass` for custom renderables.
+    - **Migration:** Add `TypeId`s to `VisibilityClass`. `VisibleEntities::get` now takes `TypeId`.
+  - **Audio sink muting:** `AudioSinkPlayback::set_volume()` takes `&mut self`. `PlaybackSettings` has `muted` field. New `is_muted()`, `mute()`, `unmute()`, `toggle_mute()` methods.
+    - **Migration:** Change `AudioSink` queries to `&mut AudioSink`. Set `muted` in `PlaybackSettings`. Use new methods.
+  - **`GpuImage::size` is `Extent3d`:** Use `size_2d()` for 2D.
+  - **`AudioSinkPlayback::toggle()` renamed:** To `toggle_playback()`.
+  - **Deprecated 0.15 `bevy::ecs` items removed:** `Events::get_reader()`, `ManualEventReader`, `Condition::and_then()`, `World::many_entities()`, etc.
+  - **Input focus system:** `bevy::a11y::Focus` replaced by `bevy::input_focus::InputFocus`.
+  - **`KeyboardInput` `text` field:** New field.
+  - **`bevy_picking` focus renamed to hover:** `update_focus` -> `generate_hovermap`, `PickSet::Focus` -> `Hover`, etc.
+  - **`BinnedPhaseItem` `batch_set_key`:** Now separate from `bin_key`. Set to `()` if not using multidraw.
+  - **`EaseFunction::ExponentialIn/Out/InOut` continuity fix:** Small numerical changes.
+  - **`DeferredWorld::trigger()` generic parameter removed:** Unused.
+  - **`EntityHashMap`/`Set` `with_hasher`/`with_capacity_and_hasher`:** Replaced by `new`/`with_capacity`.
+  - **`NormalizedWindowRef::entity` replaced:** By `EntityBorrow::entity` impl.
+  - **`Curve` functionality to extension traits:** `map`, `reparametrize`, `reverse` require `CurveExt`. `resample_*` require `CurveResampleExt`.
+    - **Migration:** `use bevy::math::prelude::*` or explicit `use` statements.
+  - **`bevy_math` `bevy_reflect` feature:** Now non-default.
+    - **Migration:** Enable `bevy_reflect` feature for `bevy_math` if using it alone.
+  - **`EaseFunction` `#[non_exhaustive]`:** Add `_ =>` arm to exhaustive matches.
+  - **`RawHandleWrapper` fields private:** Use getters/setters.
+  - **Gamepad button/axis values rescaled:** Linearly to `0.0..=1.0` and `-1.0..=0.0`/`0.0..=1.0`.
+  - **Command structs removed (hierarchy, events):** Replace with `EntityCommands` or `Commands` methods.
+    - **Hierarchy:** `AddChild { child, parent }` -> `entity(parent).add_child(child)`. `DespawnRecursive` -> `despawn()`. `DespawnChildrenRecursive` -> `despawn_related::<Children>()`.
+    - **Events:** `SendEvent { event }` -> `send_event(event)`.
+  - **`EntityMutExcept` no longer `Clone`:**
+  - **`ExtractedSprite` `kind` field:** `Single` or `Slices`. `anchor`, `rect`, `scaling_mode`, `custom_size` moved to `Single`.
+  - **`ExtractedUiItem::Gylphs` `atlas_scaling` removed:**
+  - **`BoxedSystem<(), ()>` `IntoScheduleConfigs`:** Not implemented.
+    - **Migration:** Wrap system in `InfallibleSystemWrapper` or make system return `Result<(), BevyError>`.
+  - **`Projection` is component:** `PerspectiveProjection`/`OrthographicProjection` no longer components. Use `Projection::custom()`.
+  - **`track_change_detection` renamed:** To `track_location`.
+  - **`ExtractedSprites` uses `MainEntityHashMap`:** Keyed on `MainEntity`. `render_entity` stores render world entity.
+  - **`EntityFetchError` renamed:** To `EntityMutableFetchError`. `NoSuchEntity` to `EntityDoesNotExist`.
+  - **`CustomCursor::Image` new fields:** `texture_atlas`, `flip_x`, `flip_y`, `rect`.
+    - **Migration:** Set new fields or use `None`/`false`.
+  - **`InstanceInputUniformBuffer::get` returns `Option<BDI>`:** Use `get_unchecked` for old behavior.
+  - **Sprite/UI picking backends:** No longer included by default.
+    - **Migration:** Enable `bevy_sprite_picking_backend`/`bevy_ui_picking_backend` features if needed.
+  - **Custom phase items and indirect drawing:** Need to populate indirect drawing buffers.
+  - **`EntityCommands::apply()` takes `EntityWorldMut`:**
+    - **Old:** `fn apply(self, entity: Entity, world: &mut World)`
+    - **New:** `fn apply(self, entity_world: EntityWorldMut)` (use `entity_world.id()` and `entity_world.world_scope()`).
+  - **`CommandWithEntity` trait:** `EntityCommand::with_entity()` moved here.
+  - **`TextureAtlas` types moved:** From `bevy_sprite` to `bevy_image`.
+    - **Migration:** Update `use` paths (`bevy::image::TextureAtlas`). Add `bevy_image` dependency if only using `bevy_sprite`.
+  - **Sprite picking strictly opt-in:** Requires `SpritePickingCamera` and `Pickable` components.
+  - **`DefaultCameraView` renamed:** To `UiCameraView`.
+  - **`FrameTimeDiagnosticsPlugin` fields:** `max_history_length`, `smoothing_factor`.
+    - **Migration:** Use `FrameTimeDiagnosticsPlugin::default()` or `new()`.
+  - **`bevy_remote` `serialize` feature:** Enabled automatically.
+    - **Migration:** If not desired, import `bevy_remote` on its own.
+  - **`PickingBehavior` renamed:** To `Pickable`.
+  - **RayCast pickable:** Replaced by `MeshPickingCamera` and `Pickable`.
+  - **`World::try_despawn()` returns `Result`:** `try_insert_batch()`/`try_insert_batch_if_new()` also return `Result`.
+  - **`Event` trait `Component` bound removed:**
+    - **Migration:** Manually derive `Component` if an event needs it.
+  - **Entity relationships built-in:**
+    - **`EntityCommands::with_children()`:** Now passes `ChildSpawnerCommands` (has `target_entity()`, `commands()`).
+    - **`set_parent()`:** Replaced by `insert(ChildOf(parent))`.
+    - **`replace_children()`:** Replaced by `remove::<Children>()` then `add_children()`.
+    - **Despawning:** `despawn_recursive()` -> `despawn()`. `despawn_descendants()` -> `despawn_related::<Children>()`. `despawn()` (parent only) -> `remove::<Children>()`, then `despawn()`.
+    - **Query methods:** `parent` -> `related`, `children` -> `relationship_sources`.
+  - **`TargetCamera` renamed:** To `UiTargetCamera`.
+  - **`Segment2d` constructors:** `from_direction` if direction and length used.
+  - **Custom mesh pipeline work item buffers:** Use `get_or_create_work_item_buffer`.
+  - **`PointerAction::Pressed` split:** To `Press`, `Release`. `Moved` -> `Move`, `Canceled` -> `Cancel`.
+  - **`Parent` component renamed:** To `ChildOf`. `ChildOf::parent()` to access parent.
+  - **Reflected `HashMap`/`HashSet` hasher:** Must implement `Default`.
+  - **`Resource` trait moved:** From `bevy::ecs::system` to `bevy::ecs::resource`.
+  - **`Mesh::merge` returns `Result`:** `Result<(), MeshMergeError>`.
+  - **`wasm32v1-none` target support:** `web` feature flag added (enabled by default).
+    - **Migration:** If `default-features = false`, enable `web` for browser builds.
+  - **Component hook signature simplified:** `ComponentHook` arguments in `HookContext`.
+    - **Old:** `fn my_hook(mut world: DeferredWorld, entity: Entity, component_id: ComponentId)`
+    - **New:** `fn my_hook(mut world: DeferredWorld, HookContext { entity, component_id, caller }: HookContext)`
+  - **`CustomCursor` variants:** Now hold `CustomCursorImage` or `CustomCursorUrl`.
+    - **Migration:** Update `CustomCursor` usage.
+  - **`DynamicBundle` `Effect` associated type:** Manual `DynamicBundle` implementations need `type Effect = ();`.
+  - **`WindowMode::SizedFullscreen`/`Fullscreen` `VideoModeSelection`:** Now take `VideoModeSelection`.
+    - **Migration:** Use `VideoModeSelection::Current` or specific `VideoMode`.
+  - **`wgpu` v24 update:** DirectX 12 compiler priority changed. Default shadow cascade distances changed.
+  - **`DeserializeWithRegistry` not `PartialReflect`:**
+    - **Migration:** Add `+ PartialReflect` to your own trait bounds if relying on it.
+  - **`Ref` `changed_by()` returns `MaybeLocation`:** Available even if `track_location` disabled.
+    - **Migration:** Use `MaybeLocation::into_option()`. Pass location info unconditionally when constructing `Ref`/`Mut`/`Res`/`ResMut`.
+  - **Audio volume `Volume` enum:** `Linear`, `Decibels`. `Volume::ZERO` -> `Volume::SILENT`.
+    - **Migration:** Update `Volume` instantiations (`Volume::Linear(1.0)`). Adjust `AudioSinkPlayback` methods.
+  - **`CubicCurve::new_bezier` renamed:** To `CubicCurve::new_bezier_easing`.
+  - **Component registration decoupled from `Storages`:** `Components::register_component` methods moved to `ComponentsRegistrator`.
+    - **Migration:** Obtain `ComponentsRegistrator` from `World::components_registrator()`.
+  - **`WorldQuery::Item`/`fetch()` moved:** To `QueryData`.
+  - **Component hook registration methods:** Split into `Component::on_add()`, `on_remove()`, etc.
+    - **Old:** `fn register_component_hooks(hooks: &mut ComponentHooks) { hooks.on_add(foo_on_add); }`
+    - **New:** `fn on_add() -> Option<ComponentHook> { Some(foo_on_add) }`
+  - **`QueryLens::query()` lifetime shrink:** May cause lifetime errors for `get_inner()`/`iter_inner()`.
+    - **Migration:** Switch to `QueryLens::query_inner()` for immutable queries.
+  - **`Handle::weak_from_u128()` deprecated:** Use `weak_handle!` macro.
+    - **Old:** `const SHADER: Handle<Shader> = Handle::weak_from_u128(...);`
+    - **New:** `const SHADER: Handle<Shader> = weak_handle!("...");`
+  - **iOS Simulator feature:** No longer needed.
+    - **Migration:** Remove `ios_simulator` feature from `Cargo.toml`.
+  - **`EaseFunction::Steps` behavior change:** Now "jump-end" like CSS.
+    - **Migration:** New second parameter `JumpAt`. `EaseFunction::Steps(10)` -> `EaseFunction::Steps(10, JumpAt::default())`.
+  - **`Image::from_buffer()` `name` argument removed:**
+  - **WGPU runtime safety checks removed:**
+  - **`QueryIter` `sort()` methods lifetime fix:**
+    - **Migration:** Make comparer closures generic over new lifetime (e.g., `|l, r| Ord::cmp(l, r)`).
+  - **Sprite picking opt-in:** Requires `Pickable` component.
+    - **Old:** `commands.spawn(Sprite { .. } );`
+    - **New:** `commands.spawn((Sprite { .. }, Pickable::default());`
+  - **`World` `inspect_entity` returns `Result`:** No longer panics.
+  - **`GpuImage::size` now `Extent3d`:**
+    - **Migration:** Use `size_2d()`.
+  - **`UiPlugin` `add_picking` field:** If `bevy_ui_picking_backend` is enabled.
+  - **`SpritePlugin` fields:** If `bevy_sprite_picking_backend` is enabled.
+  - **`RenderCreation::Manual` fields:** Wrapped in `RenderResources`.
+  - **`PartialReflect` -> `PartialReflect`:** Most `dyn Reflect` to `dyn PartialReflect`. Manual `Reflect` implementations need `as_partial_reflect` methods.
+  - **`UiPlugin` `enable_rendering` field:** Allows disabling UI rendering.
+  - **`ZIndex` split:** Into `ZIndex` (local) and `GlobalZIndex`.
+  - **Meshlet changes (runtime):** Requires `WgpuFeatures::SHADER_INT64_ATOMIC_MIN_MAX`. `MeshletPlugin` needs `cluster_buffer_slots`. `MaterialMeshletMeshBundle` deprecated.
+    - **Asset Conversion:** Regenerate assets (format changed). `MeshletMesh::from_mesh()` no tangents. Requires `vertex_position_quantization_factor`.
+  - **`TaskPoolThreadAssignmentPolicy`:** New `on_thread_spawn`/`on_thread_destroy` fields (default `None`).
+  - **iOS `#[bevy_main]` removal:**
+    - **New Approach:** Remove Xcode compile/link phases, use run script `cargo build --bin ...` and move binary.
+    - **Old Behavior:** Add `#[cfg(target_os = "ios")] #[unsafe(no_mangle)] extern "C" fn main_rs() { main() }`.
+  - **`LoadedAsset` `meta` field removed:**
+    - **Migration:** `ErasedAssetLoader::load()` takes `meta: &(dyn AssetMetaDyn + 'static)`. `LoadedAsset::new_with_dependencies()` and `LoadContext::finish()` no longer require `meta` argument.
+  - **Bevy ECS `petgraph` removal:** `petgraph::graph::DiGraph` -> `bevy::ecs::schedule::graph::DiGraph`.
+  - **`Query::to_readonly()` renamed:** To `Query::as_readonly()`.
+  - **`MAX_UNIFORM_BUFFER_CLUSTERABLE_OBJECTS` reduced (again):** From 256 to 204.
+  - **`UiImage` and `TextureAtlas` usage:** Same as 0.15 update.
+  - **Picking Backend renaming:** `MeshPickingBackend` -> `MeshPickingPlugin`, etc. `DefaultPickingPlugins` is now `PluginGroup`.
+  - **`ImageScaleMode` removed:** Replaced by `SpriteImageMode`/`NodeImageMode` on `Sprite`/`UiImage`.
+  - **`OrderIndependentTransparencySettings` `alpha_threshold`:** Similar to previous.
+  - **`UiSurface::get_layout` return value (again):** Includes final sizes before rounding.
+  - **`Entities::remove` return value (again):** If not needed, discard.
+  - **Gamepad fields public (again):** Delegate methods removed. `GamepadInfo` removed.
+  - **`ComponentTicks` direct field access (again):** Methods removed.
+  - **`UiImage::new(image)` to `ImageNode::new(image)` (again):**
+  - **`ComputePipelineDescriptor`/`RenderPipelineDescriptor` `zero_initialize_workgroup_memory` (again):**
+  - **`Rot2::angle_between` deprecated (again):** Use `Rot2::angle_to`.
+  - **`bevy_picking/src/pointer.rs` changes (again):** `PressDirection::Down` -> `Pressed`, `Up` -> `Released`.
+  - **`Access::try_iter_component_access()` (again):** Replaces old iterator methods.
+  - **`RenderAssets::prepare_asset` (again):** Takes `AssetId`.
+  - **`Component::Mutability` associated type (again):**
+  - **`Mut<T>` -> `OccupiedEntry<T>` (again):**
+  - **`ComputedNode` physical coordinates (again):**
+  - **Sprite picking transparency (again):** Configurable.
+  - **Cubic splines `IntoIterator` (again):**
+  - **`LayoutContext` `min`/`max` fields removed (again):**
+  - **`Entities::flush_and_reserve_invalid_assuming_no_entities()` removed (again):**
+  - **`VisibilityRange` `use_aabb` field (again):**
+  - **`UiPlugin`/`SpritePlugin` picking fields (again):**
+  - **`RenderCreation::Manual` fields wrapped (again):**
+  - **Observer/Hook ordering swapped for `on_replace()` and `on_remove()` (again):**
+  - **Bevy UI multiple shadows (again):**
+  - **`World::run_system_with_input` renamed (again):**
+  - **`EntityBorrow` for custom iterators (again):**
+  - **`PartialReflect::serializable` removed (again):**
+  - **Fallible systems executor changes (again):**
+  - **`TextFont` `line_height` field (again):**
+  - **`AsBindGroup::unprepared_bind_group` no panic (again):**
+  - **`apply_deferred()` is a system type (again):**
+  - **`Opaque3dBinKey::lightmap_image` -> `lightmap_slab` (again):**
+  - **`bevy_dev_tools::ui_debug_overlay` replaced (again):**
+  - **`CachedSystemId` stores `Entity` (again):**
+  - **`RayCastSettings` renamed (again):**
+  - **`Trigger::entity()` renamed (again):**
+  - **`EntityCloner` in component clone handlers (again):**
+  - **Bevy Remote Protocol `bevy/query` (again):**
+  - **`BorderRect` `square`/`rectangle` renamed (again):**
+  - **Indirect drawing (GPU culling) enabled by default (again):**
+  - **Light/Irradiance Volume `affects_lightmapped_meshes` (again):**
+  - **`RenderTarget::Image` takes `ImageRenderTarget` (again):**
+  - **`Assets::asset_events()` system private (again):**
+  - **`check_visibility` no `QueryFilter` param (again):**
+  - **Audio sink muting (again):**
+  - **`GpuImage::size` is `Extent3d` (again):**
+  - **`AudioSinkPlayback::toggle()` renamed (again):**
+  - **Deprecated 0.15 `bevy::ecs` items removed (again):**
+  - **Input focus system (again):**
+  - **`KeyboardInput` `text` field (again):**
+  - **`bevy_picking` focus renamed to hover (again):**
+  - **`BinnedPhaseItem` `batch_set_key` (again):**
+  - **`EaseFunction::ExponentialIn/Out/InOut` continuity fix (again):**
+  - **`DeferredWorld::trigger()` generic parameter removed (again):**
+  - **`EntityHashMap`/`Set` `with_hasher`/`with_capacity_and_hasher` (again):**
+  - **`NormalizedWindowRef::entity` replaced (again):**
+  - **`Curve` functionality to extension traits (again):**
+  - **`bevy_math` `bevy_reflect` feature (again):**
+  - **`EaseFunction` `#[non_exhaustive]` (again):**
+  - **`RawHandleWrapper` fields private (again):**
+  - **Gamepad button/axis values rescaled (again):**
+  - **Command structs removed (hierarchy, events) (again):**
+  - **`EntityMutExcept` no longer `Clone` (again):**
+  - **`ExtractedSprite` `kind` field (again):**
+  - **`ExtractedUiItem::Gylphs` `atlas_scaling` removed (again):**
+  - **`BoxedSystem<(), ()>` `IntoScheduleConfigs` (again):**
+  - **`Projection` is component (again):**
+  - **`track_change_detection` renamed (again):**
+  - **`ExtractedSprites` uses `MainEntityHashMap` (again):**
+  - **`EntityFetchError` renamed (again):**
+  - **`CustomCursor::Image` new fields (again):**
+  - **`InstanceInputUniformBuffer::get` returns `Option<BDI>` (again):**
+  - **Sprite/UI picking backends (again):**
+  - **Custom phase items and indirect drawing (again):**
+  - **`EntityCommands::apply()` takes `EntityWorldMut` (again):**
+  - **`CommandWithEntity` trait (again):**
+  - **`TextureAtlas` types moved (again):**
+  - **Sprite picking strictly opt-in (again):**
+  - **`DefaultCameraView` renamed (again):**
+  - **`FrameTimeDiagnosticsPlugin` fields (again):**
+  - **`bevy_remote` `serialize` feature (again):**
+  - **`PickingBehavior` renamed (again):**
+  - **RayCast pickable (again):**
+  - **`World::try_despawn()` returns `Result` (again):**
+  - **`Event` trait `Component` bound removed (again):**
+  - **Entity relationships built-in (again):**
+  - **`TargetCamera` renamed (again):**
+  - **`Segment2d` constructors (again):**
+  - **Custom mesh pipeline work item buffers (again):**
+  - **`PointerAction::Pressed` split (again):**
+  - **`Parent` component renamed (again):**
+  - **Reflected `HashMap`/`HashSet` hasher (again):**
+  - **`Resource` trait moved (again):**
+  - **`Mesh::merge` returns `Result` (again):**
+  - **`wasm32v1-none` target support (again):**
+  - **Component hook signature simplified (again):**
+  - **`CustomCursor` variants (again):**
+  - **`DynamicBundle` `Effect` associated type (again):**
+  - **`WindowMode::SizedFullscreen`/`Fullscreen` `VideoModeSelection` (again):**
+  - **`wgpu` v24 update (again):**
+  - **`DeserializeWithRegistry` not `PartialReflect` (again):**
+  - **`Ref` `changed_by()` returns `MaybeLocation` (again):**
+  - **Audio volume `Volume` enum (again):**
+  - **`CubicCurve::new_bezier` renamed (again):**
+  - **Component registration decoupled from `Storages` (again):**
+  - **`WorldQuery::Item`/`fetch()` moved (again):**
+  - **Component hook registration methods (again):**
+  - **`QueryLens::query()` lifetime shrink (again):**
+  - **`Handle::weak_from_u128()` deprecated (again):**
+  - **iOS Simulator feature (again):**
+  - **`EaseFunction::Steps` behavior change (again):**
+  - **`Image::from_buffer()` `name` argument removed (again):**
+  - **WGPU runtime safety checks removed (again):**
+  - **`QueryIter` `sort()` methods lifetime fix (again):**
+  - **Sprite picking opt-in (again):**
+  - **`World::inspect_entity` returns `Result` (again):**
+  - **`uv_transform` field to `ColorMaterial` constructors:**
+  - **`PositionedGlyph::new()` removed:** Construct directly.
+  - **Scene entities not in hierarchy despawned:** Use `SceneSpawner::despawn_instance()` if relying on this.
+  - **`bevy` crate `no_std` support:** Features like `std`, `async_executor`, `bevy_log` now behind flags.
+    - **Migration (App):** If `default-features = false`, enable `std`, `async_executor`.
+    - **Migration (Lib):** Depend on `bevy` with `default-features = false`, expose features as needed.
+  - **`ScheduleConfigs<T>` and `IntoScheduleConfigs<T>`:** New generic types.
+    - **Migration:** Replace `SystemConfigs` with `ScheduleConfigs<ScheduleSystem>`, `SystemSetConfigs` with `ScheduleConfigs<InternedSystemSet>`, etc.
+  - **`EventWriter::send()` renamed:** To `EventWriter::write()`. Deprecated old methods.
+  - **`RequiredComponents::register_dynamic()` replaced:** By `register_dynamic_with()` (avoids cloning).
+  - **`Query::single()`, `single_mut()` return `Result`:**
+    - **Migration:** Use `?` operator, `let Ok(data) = result else {}`, or `unwrap()`/`Ok` destructuring in tests. Old `get_single()` deprecated.
+  - **`#[derive(Event)]` specialized implementations:** Now supports `#[event(traversal = ...)]` and `#[event(auto_propagate)]`.
+  - **`Commands::insert_or_spawn_batch()` etc. deprecated:** Planned for removal in 0.17.
+    - **Migration:** Use `Disabled` component or `spawn_batch()` and update IDs.
+  - **`QueryEntityError::QueryDoesNotMatch` stores `ArchetypeId`:** (Not `UnsafeWorldCell`). Lifetime removed.
+  - **Component registration with shared `World` access:** New `ComponentsRegistrator` and `World::components_registrator()`.
+  - **`Query::many()`/`many_mut()` deprecated:** Use non-panicking `get_many()`/`get_many_mut()`.
+  - **`FilteredResource::get` return type:** Now `Result` (not `Option`).
+  - **`PartialReflect::clone_value` deprecated:** Use `to_dynamic` or `reflect_clone`.
+  - **`NonSendMarker` is system parameter:** No longer needs `Option<NonSend<_>>`. Moved to `bevy::ecs::system`.
+  - **`PrepassPipeline` fields:** Most moved to `PrepassPipeline::internal`.
+  - **Anti-aliasing imports:** From `bevy::anti_aliasing` instead of `bevy::core_pipeline`.
+  - **`VisitEntities`/`VisitEntitiesMut` removed:** Use `MapEntities` with `#[entities]` attribute.
+  - **`Component::visit_entities()` removed:** Use `Component::map_entities()`.
+  - **`Anchor` component changed:** From enum to struct newtyping `Vec2`. `Custom` variant removed. Constants for common anchors (`Anchor::BOTTOM_LEFT`).
+  - **`Components::get_name` returns `Option<Cow<'_, str>>`:** Due to queued component registration.
+  - **`ParamWarnPolicy` removed:** Failures handled by `GLOBAL_ERROR_HANDLER`.
+  - **System/System Param validation:** Returns `ValidationOutcome` enum (`Valid`, `Invalid`, `Skipped`).
+  - **`Image::from_buffer()` no `name` argument:**
+  - **`bevy_picking::backend::ray::RayMap::map` method removed:** Use `&ray_map.map`.
+  - **Required component syntax reworked:** `#[require(A(returns_a))]` -> `#[require(A = returns_a())]`. `#[require(A(|| A(10)))]` -> `#[require(A(10))]` or `#[require(A = A(10))]`.
+  - **`bevy_core` removed:** Items moved to `bevy_diagnostic`, `bevy_ecs::name`, `bevy_ecs::system`, `bevy_app`. `TypeRegistrationPlugin` removed.
+  - **`bevy_utils` reduced:** Many items moved to `ahash`, `core::time`, `bevy_platform::hash`, `bevy_platform::time`, `std::time`, `bevy_tasks`, `variadics_please`, `bevy_log`, `bevy_platform::collections`. Some items removed completely.
+    - **Migration:** Update imports. Add direct dependencies if needed for removed items.
