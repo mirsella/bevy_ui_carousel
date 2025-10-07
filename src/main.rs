@@ -16,7 +16,7 @@ struct Viewport;
 struct PageTrack;
 
 #[derive(Component)]
-struct Page(pub usize);
+struct Page(#[allow(dead_code)] pub usize);
 
 #[derive(Component, Debug)]
 struct Slider {
@@ -80,15 +80,16 @@ fn main() {
         .init_resource::<DragState>()
         .add_systems(Startup, setup)
         .add_systems(
-            Update,
-            (
-                nav_buttons,
-                keyboard_nav,
-                drag_nav,
-                on_tween_completed,
-                handle_window_resize,
-            ),
-        )
+        Update,
+        (
+            nav_buttons,
+            keyboard_nav,
+            drag_nav,
+            process_pending_steps,
+            on_tween_completed,
+            handle_window_resize,
+        ),
+    )
         .run();
 }
 
@@ -217,11 +218,15 @@ fn setup(mut commands: Commands, windows: Query<&Window>) {
 fn nav_buttons(
     q_prev: Query<&Interaction, (Changed<Interaction>, With<Button>, With<NavPrevBtn>)>,
     q_next: Query<&Interaction, (Changed<Interaction>, With<Button>, With<NavNextBtn>)>,
-    mut q_track: Query<&mut Slider, With<PageTrack>>,
+    mut q_track: Query<(&mut Slider, Option<&TweenAnim>), With<PageTrack>>,
 ) {
-    let Ok(mut slider) = q_track.single_mut() else {
+    let Ok((mut slider, animator)) = q_track.single_mut() else {
         return;
     };
+
+    if animator.is_some() {
+        return;
+    }
 
     if let Ok(inter) = q_prev.single() && *inter == Interaction::Pressed {
         slider.pending_steps -= 1;
@@ -231,10 +236,15 @@ fn nav_buttons(
     }
 }
 
-fn keyboard_nav(keys: Res<ButtonInput<KeyCode>>, mut q: Query<&mut Slider, With<PageTrack>>) {
-    let Ok(mut slider) = q.single_mut() else {
+fn keyboard_nav(keys: Res<ButtonInput<KeyCode>>, mut q: Query<(&mut Slider, Option<&TweenAnim>), With<PageTrack>>) {
+    let Ok((mut slider, animator)) = q.single_mut() else {
         return;
     };
+    
+    if animator.is_some() {
+        return;
+    }
+    
     let mut delta = 0i32;
     if keys.just_pressed(KeyCode::ArrowRight) || keys.just_pressed(KeyCode::KeyD) {
         delta += 1;
@@ -311,11 +321,27 @@ fn drag_nav(
             TouchPhase::Ended | TouchPhase::Canceled => {
                 if drag.touch.take().is_some() {
                     let left = get_left_px(&node);
-                    let frac = (-left / view_width).clamp(0.0, 1.0);
-                    if frac > 0.35 {
-                        start_next_tween(track_e, &mut node, &mut slider, view_width, &mut commands);
+                    
+                    if left > 0.0 {
+                        // Dragged left (previous page visible)
+                        let frac = left / view_width;
+                        if frac > 0.05 {
+                            // Complete transition to previous page
+                            start_back_tween(track_e, &mut node, &mut slider, &mut commands);
+                        } else {
+                            // Snap back to current (cancel)
+                            start_prev_cancel_tween(track_e, children, &mut node, &mut slider, view_width, &mut commands);
+                        }
                     } else {
-                        start_back_tween(track_e, &mut node, &mut slider, &mut commands);
+                        // Dragged right (next page visible)
+                        let frac = -left / view_width;
+                        if frac > 0.05 {
+                            // Complete transition to next page
+                            start_next_tween(track_e, &mut node, &mut slider, view_width, &mut commands);
+                        } else {
+                            // Snap back to current
+                            start_back_tween(track_e, &mut node, &mut slider, &mut commands);
+                        }
                     }
                 }
             }
@@ -353,11 +379,27 @@ fn drag_nav(
 
     if mouse_buttons.just_released(MouseButton::Left) && drag.mouse.take().is_some() {
         let left = get_left_px(&node);
-        let frac = (-left / view_width).clamp(0.0, 1.0);
-        if frac > 0.35 {
-            start_next_tween(track_e, &mut node, &mut slider, view_width, &mut commands);
+        
+        if left > 0.0 {
+            // Dragged left (previous page visible)
+            let frac = left / view_width;
+            if frac > 0.05 {
+                // Complete transition to previous page
+                start_back_tween(track_e, &mut node, &mut slider, &mut commands);
+            } else {
+                // Snap back to current (cancel)
+                start_prev_cancel_tween(track_e, children, &mut node, &mut slider, view_width, &mut commands);
+            }
         } else {
-            start_back_tween(track_e, &mut node, &mut slider, &mut commands);
+            // Dragged right (next page visible)
+            let frac = -left / view_width;
+            if frac > 0.05 {
+                // Complete transition to next page
+                start_next_tween(track_e, &mut node, &mut slider, view_width, &mut commands);
+            } else {
+                // Snap back to current
+                start_back_tween(track_e, &mut node, &mut slider, &mut commands);
+            }
         }
     }
 
@@ -373,37 +415,45 @@ fn drag_nav(
     }
 }
 
+fn process_pending_steps(
+    mut q: Query<(Entity, &Children, &mut Node, &mut Slider, Option<&TweenAnim>), With<PageTrack>>,
+    mut commands: Commands,
+) {
+    let Ok((entity, children, mut node, mut slider, animator)) = q.single_mut() else {
+        return;
+    };
+
+    if animator.is_some() || slider.pending_steps == 0 {
+        return;
+    }
+
+    let view_width = slider.view_w;
+
+    if slider.pending_steps > 0 {
+        slider.pending_steps -= 1;
+        start_next_tween(entity, &mut node, &mut slider, view_width, &mut commands);
+    } else {
+        slider.pending_steps += 1;
+        rotate_last_to_front(entity, children, &mut commands);
+        slider.current = (slider.current + slider.page_count - 1) % slider.page_count;
+        node.left = Val::Px(-view_width);
+        start_back_tween(entity, &mut node, &mut slider, &mut commands);
+    }
+}
+
 fn on_tween_completed(
     mut ev: MessageReader<AnimCompletedEvent>,
     mut q: Query<(Entity, &Children, &mut Node, &mut Slider), With<PageTrack>>,
     mut commands: Commands,
 ) {
     for e in ev.read() {
-        // Only react to track entity completion
         if let Ok((entity, children, mut node, mut slider)) = q.get_mut(e.anim_entity) {
             if slider.post_action == PostAction::RotateFirstToEndResetToZero {
-                // We've ended at -view_width visually. Rotate and reset to 0.
                 rotate_first_to_end(entity, children, &mut commands);
                 slider.current = (slider.current + 1) % slider.page_count;
                 node.left = Val::Px(0.0);
             }
             slider.post_action = PostAction::None;
-            let view_width = slider.view_w;
-
-            // Drain queued steps
-            if slider.pending_steps != 0 {
-                if slider.pending_steps > 0 {
-                    slider.pending_steps -= 1;
-                    start_next_tween(entity, &mut node, &mut slider, view_width, &mut commands);
-                } else {
-                    slider.pending_steps += 1;
-                    // prev: pre-rotate and tween -view_width -> 0
-                    rotate_last_to_front(entity, children, &mut commands);
-                    slider.current = (slider.current + slider.page_count - 1) % slider.page_count;
-                    node.left = Val::Px(-view_width);
-                    start_back_tween(entity, &mut node, &mut slider, &mut commands);
-                }
-            }
         }
     }
 }
@@ -474,6 +524,21 @@ fn start_back_tween(track: Entity, node: &mut Node, slider: &mut Slider, command
         NodeLeftLens { start, end },
     );
     commands.entity(track).insert(TweenAnim::new(tween));
+}
+
+fn start_prev_cancel_tween(
+    track: Entity,
+    children: &Children,
+    node: &mut Node,
+    slider: &mut Slider,
+    _view_width: f32,
+    commands: &mut Commands,
+) {
+    // Cancel the drag - need to rotate back and reset position
+    rotate_first_to_end(track, children, commands);
+    slider.current = (slider.current + 1) % slider.page_count;
+    node.left = Val::Px(0.0);
+    slider.post_action = PostAction::None;
 }
 
 fn rotate_first_to_end(track: Entity, children: &Children, commands: &mut Commands) {
