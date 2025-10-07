@@ -4,10 +4,40 @@ use bevy::prelude::*;
 use bevy::ui::{BackgroundColor, Node, Overflow, OverflowAxis};
 use bevy::window::WindowResized;
 use bevy::math::curve::easing::EaseFunction;
-use bevy_tweening::{
-    TweenAnim, Tween, AnimCompletedEvent, TweeningPlugin,
-    lens::Lens,
-};
+
+// Simple custom slide animation to avoid scheduling/event race issues.
+#[derive(Component, Debug)]
+struct SlideAnim {
+    start: f32,
+    end: f32,
+    elapsed: f32,
+    duration: f32,
+    ease: EaseFunction,
+}
+
+impl SlideAnim {
+    fn new(start: f32, end: f32, duration_ms: u64, ease: EaseFunction) -> Self {
+        Self { start, end, elapsed: 0.0, duration: duration_ms as f32 / 1000.0, ease }
+    }
+}
+
+fn ease_cubic_out(t: f32) -> f32 {
+    let n = 1.0 - t;
+    1.0 - n * n * n
+}
+
+// Lens to tween Node.left (Val::Px) between two pixel values.
+#[derive(Debug, Clone, Copy)]
+struct NodeLeftLens {
+    start: f32,
+    end: f32,
+}
+impl NodeLeftLens {
+    fn sample(&self, ratio: f32) -> f32 {
+        let t = ratio.clamp(0.0, 1.0);
+        self.start + (self.end - self.start) * t
+    }
+}
 
 #[derive(Component)]
 struct Viewport;
@@ -59,24 +89,10 @@ struct NavPrevBtn;
 #[derive(Component)]
 struct NavNextBtn;
 
-// Lens to tween Node.left (Val::Px) between two pixel values.
-#[derive(Debug, Clone, Copy)]
-struct NodeLeftLens {
-    start: f32,
-    end: f32,
-}
-impl Lens<Node> for NodeLeftLens {
-    fn lerp(&mut self, mut target: Mut<'_, Node>, ratio: f32) {
-        let t = ratio.clamp(0.0, 1.0);
-        let x = self.start + (self.end - self.start) * t;
-        target.left = Val::Px(x);
-    }
-}
 
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins)
-        .add_plugins(TweeningPlugin)
         .init_resource::<DragState>()
         .add_systems(Startup, setup)
         .add_systems(
@@ -86,7 +102,7 @@ fn main() {
             keyboard_nav,
             drag_nav,
             process_pending_steps,
-            on_tween_completed,
+            tick_slide_anim,
             handle_window_resize,
         ),
     )
@@ -218,16 +234,13 @@ fn setup(mut commands: Commands, windows: Query<&Window>) {
 fn nav_buttons(
     q_prev: Query<&Interaction, (Changed<Interaction>, With<Button>, With<NavPrevBtn>)>,
     q_next: Query<&Interaction, (Changed<Interaction>, With<Button>, With<NavNextBtn>)>,
-    mut q_track: Query<(&mut Slider, Option<&TweenAnim>), With<PageTrack>>,
+    mut q_track: Query<(&mut Slider, Option<&SlideAnim>), With<PageTrack>>,
 ) {
-    let Ok((mut slider, animator)) = q_track.single_mut() else {
+    let Ok((mut slider, _animator)) = q_track.single_mut() else {
         return;
     };
 
-    if animator.is_some() {
-        return;
-    }
-
+    // Always queue steps, even during animation
     if let Ok(inter) = q_prev.single() && *inter == Interaction::Pressed {
         slider.pending_steps -= 1;
     }
@@ -236,15 +249,12 @@ fn nav_buttons(
     }
 }
 
-fn keyboard_nav(keys: Res<ButtonInput<KeyCode>>, mut q: Query<(&mut Slider, Option<&TweenAnim>), With<PageTrack>>) {
-    let Ok((mut slider, animator)) = q.single_mut() else {
+fn keyboard_nav(keys: Res<ButtonInput<KeyCode>>, mut q: Query<(&mut Slider, Option<&SlideAnim>), With<PageTrack>>) {
+    let Ok((mut slider, _animator)) = q.single_mut() else {
         return;
     };
-    
-    if animator.is_some() {
-        return;
-    }
-    
+
+    // Always queue steps, even during animation
     let mut delta = 0i32;
     if keys.just_pressed(KeyCode::ArrowRight) || keys.just_pressed(KeyCode::KeyD) {
         delta += 1;
@@ -268,7 +278,7 @@ fn drag_nav(
             &Children,
             &mut Node,
             &mut Slider,
-            Option<&TweenAnim>,
+            Option<&SlideAnim>,
         ),
         With<PageTrack>,
     >,
@@ -278,11 +288,21 @@ fn drag_nav(
     let Ok((track_e, children, mut node, mut slider, animator)) = q.single_mut() else {
         return;
     };
+    let view_width = slider.view_w;
+
+    // Cancel animation immediately when user starts a new drag for responsive interaction
     if animator.is_some() {
-        return; // ignore drag during tween
+        let any_new_drag = ev_touches.read().any(|ev| matches!(ev.phase, TouchPhase::Started))
+            || mouse_buttons.just_pressed(MouseButton::Left);
+        
+        if any_new_drag {
+            commands.entity(track_e).remove::<SlideAnim>();
+            slider.post_action = PostAction::None;
+        } else {
+            return; // Animation running, no new drag started
+        }
     }
 
-    let view_width = slider.view_w;
 
 
     // touch
@@ -319,29 +339,27 @@ fn drag_nav(
                 }
             }
             TouchPhase::Ended | TouchPhase::Canceled => {
-                if drag.touch.take().is_some() {
+                if let Some(td) = drag.touch.take() {
                     let left = get_left_px(&node);
-                    
-                    if left > 0.0 {
-                        // Dragged left (previous page visible)
-                        let frac = left / view_width;
-                        if frac > 0.05 {
-                            // Complete transition to previous page
-                            start_back_tween(track_e, &mut node, &mut slider, &mut commands);
-                        } else {
-                            // Snap back to current (cancel)
-                            start_prev_cancel_tween(track_e, children, &mut node, &mut slider, view_width, &mut commands);
-                        }
+                    let dx_total = ev.position.x - td.start.x;
+                    let mut left_norm = left;
+                    if left_norm > 0.0 { left_norm -= view_width; }
+                    // If an animation is still running, just queue the step instead of forcing another tween
+                    if let Some(_a) = animator {
+                        if dx_total <= -view_width * 0.05 { slider.pending_steps += 1; }
+                        else if dx_total >= view_width * 0.05 { slider.pending_steps -= 1; }
+                        // else do nothing
                     } else {
-                        // Dragged right (next page visible)
-                        let frac = -left / view_width;
-                        if frac > 0.05 {
-                            // Complete transition to next page
-                            start_next_tween(track_e, &mut node, &mut slider, view_width, &mut commands);
-                        } else {
-                            // Snap back to current
-                            start_back_tween(track_e, &mut node, &mut slider, &mut commands);
-                        }
+                        finalize_drag_release(
+                            track_e,
+                            children,
+                            &mut node,
+                            &mut slider,
+                            &mut commands,
+                            dx_total,
+                            left_norm,
+                            view_width,
+                        );
                     }
                 }
             }
@@ -377,31 +395,32 @@ fn drag_nav(
         }
     }
 
-    if mouse_buttons.just_released(MouseButton::Left) && drag.mouse.take().is_some() {
-        let left = get_left_px(&node);
-        
-        if left > 0.0 {
-            // Dragged left (previous page visible)
-            let frac = left / view_width;
-            if frac > 0.05 {
-                // Complete transition to previous page
-                start_back_tween(track_e, &mut node, &mut slider, &mut commands);
+    if mouse_buttons.just_released(MouseButton::Left)
+        && let Some(md) = drag.mouse.take() {
+            let left = get_left_px(&node);
+            let dx_total = if let Ok(win) = windows.single() && let Some(pos) = win.cursor_position() {
+                pos.x - md.start.x
             } else {
-                // Snap back to current (cancel)
-                start_prev_cancel_tween(track_e, children, &mut node, &mut slider, view_width, &mut commands);
-            }
-        } else {
-            // Dragged right (next page visible)
-            let frac = -left / view_width;
-            if frac > 0.05 {
-                // Complete transition to next page
-                start_next_tween(track_e, &mut node, &mut slider, view_width, &mut commands);
+                get_left_px(&node) - md.start_left
+            };
+            let mut left_norm = left;
+            if left_norm > 0.0 { left_norm -= view_width; }
+            if animator.is_some() {
+                if dx_total <= -view_width * 0.05 { slider.pending_steps += 1; }
+                else if dx_total >= view_width * 0.05 { slider.pending_steps -= 1; }
             } else {
-                // Snap back to current
-                start_back_tween(track_e, &mut node, &mut slider, &mut commands);
+                finalize_drag_release(
+                    track_e,
+                    children,
+                    &mut node,
+                    &mut slider,
+                    &mut commands,
+                    dx_total,
+                    left_norm,
+                    view_width,
+                );
             }
         }
-    }
 
     if mouse_buttons.just_pressed(MouseButton::Left)
         && drag.mouse.is_none()
@@ -416,7 +435,7 @@ fn drag_nav(
 }
 
 fn process_pending_steps(
-    mut q: Query<(Entity, &Children, &mut Node, &mut Slider, Option<&TweenAnim>), With<PageTrack>>,
+    mut q: Query<(Entity, &Children, &mut Node, &mut Slider, Option<&SlideAnim>), With<PageTrack>>,
     mut commands: Commands,
 ) {
     let Ok((entity, children, mut node, mut slider, animator)) = q.single_mut() else {
@@ -441,34 +460,51 @@ fn process_pending_steps(
     }
 }
 
-fn on_tween_completed(
-    mut ev: MessageReader<AnimCompletedEvent>,
-    mut q: Query<(Entity, &Children, &mut Node, &mut Slider), With<PageTrack>>,
+// Handle slide animation progression and completion.
+fn tick_slide_anim(
+    time: Res<Time>,
+    mut q: Query<(Entity, &Children, &mut Node, &mut Slider, &mut SlideAnim), With<PageTrack>>,
     mut commands: Commands,
 ) {
-    for e in ev.read() {
-        if let Ok((entity, children, mut node, mut slider)) = q.get_mut(e.anim_entity) {
-            if slider.post_action == PostAction::RotateFirstToEndResetToZero {
-                rotate_first_to_end(entity, children, &mut commands);
-                slider.current = (slider.current + 1) % slider.page_count;
-                node.left = Val::Px(0.0);
-            }
-            slider.post_action = PostAction::None;
+    let Ok((entity, children, mut node, mut slider, mut anim)) = q.single_mut() else {
+        return;
+    };
+
+    anim.elapsed += time.delta_secs();
+    let ratio = (anim.elapsed / anim.duration).clamp(0.0, 1.0);
+    let eased = match anim.ease {
+        EaseFunction::CubicOut => ease_cubic_out(ratio),
+        _ => ratio,
+    };
+
+    let lens = NodeLeftLens { start: anim.start, end: anim.end };
+    node.left = Val::Px(lens.sample(eased));
+
+    if ratio >= 1.0 {
+        // Finish
+        node.left = Val::Px(anim.end);
+        commands.entity(entity).remove::<SlideAnim>();
+        if slider.post_action == PostAction::RotateFirstToEndResetToZero {
+            rotate_first_to_end(entity, children, &mut commands);
+            slider.current = (slider.current + 1) % slider.page_count;
+            node.left = Val::Px(0.0);
         }
+        slider.post_action = PostAction::None;
     }
 }
 
 fn handle_window_resize(
     mut eview_width: MessageReader<WindowResized>,
-    mut q: Query<(&Children, &mut Node, &mut Slider), With<PageTrack>>,
+    mut q: Query<(Entity, &Children, &mut Node, &mut Slider, Option<&SlideAnim>), With<PageTrack>>,
     mut q_page: Query<&mut Node, (With<Page>, Without<PageTrack>)>,
+    mut commands: Commands,
 ) {
     let mut new_width: Option<f32> = None;
     for ev in eview_width.read() {
         new_width = Some(ev.width);
     }
     if let Some(view_w) = new_width {
-        let Ok((children, mut track_node, mut slider)) = q.single_mut() else {
+        let Ok((entity, children, mut track_node, mut slider, anim)) = q.single_mut() else {
             return;
         };
         slider.view_w = view_w;
@@ -480,6 +516,10 @@ fn handle_window_resize(
             }
         }
 
+        // Cancel any ongoing animation and reset positioning
+        if anim.is_some() {
+            commands.entity(entity).remove::<SlideAnim>();
+        }
         track_node.left = Val::Px(0.0);
         slider.post_action = PostAction::None;
     }
@@ -494,6 +534,39 @@ fn get_left_px(node: &Node) -> f32 {
     }
 }
 
+fn finalize_drag_release(
+    track: Entity,
+    children: &Children,
+    node: &mut Node,
+    slider: &mut Slider,
+    commands: &mut Commands,
+    dx_total: f32,
+    left: f32,
+    view_width: f32,
+) {
+    let threshold_px = view_width * 0.05;
+
+    if dx_total <= -threshold_px {
+        // Commit to next page (dragged left sufficiently)
+        start_next_tween(track, node, slider, view_width, commands);
+    } else if dx_total >= threshold_px {
+        // Commit to previous page (dragged right sufficiently)
+        if get_left_px(node) >= 0.0 {
+            rotate_last_to_front(track, children, commands);
+            slider.current = (slider.current + slider.page_count - 1) % slider.page_count;
+            node.left = Val::Px(-view_width);
+        }
+        start_back_tween(track, node, slider, commands);
+    } else {
+        // Not enough movement: snap to nearest anchor.
+        if -left >= view_width * 0.5 {
+            start_next_tween(track, node, slider, view_width, commands);
+        } else {
+            start_back_tween(track, node, slider, commands);
+        }
+    }
+}
+
 fn start_next_tween(
     track: Entity,
     node: &mut Node,
@@ -505,12 +578,9 @@ fn start_next_tween(
     let end = -view_width;
     slider.post_action = PostAction::RotateFirstToEndResetToZero;
 
-    let tween = Tween::new(
-        EaseFunction::CubicOut,
-        std::time::Duration::from_millis(200),
-        NodeLeftLens { start, end },
-    );
-    commands.entity(track).insert(TweenAnim::new(tween));
+    commands
+        .entity(track)
+        .insert(SlideAnim::new(start, end, 200, EaseFunction::CubicOut));
 }
 
 fn start_back_tween(track: Entity, node: &mut Node, slider: &mut Slider, commands: &mut Commands) {
@@ -518,28 +588,11 @@ fn start_back_tween(track: Entity, node: &mut Node, slider: &mut Slider, command
     let end = 0.0;
     slider.post_action = PostAction::None;
 
-    let tween = Tween::new(
-        EaseFunction::CubicOut,
-        std::time::Duration::from_millis(200),
-        NodeLeftLens { start, end },
-    );
-    commands.entity(track).insert(TweenAnim::new(tween));
+    commands
+        .entity(track)
+        .insert(SlideAnim::new(start, end, 200, EaseFunction::CubicOut));
 }
 
-fn start_prev_cancel_tween(
-    track: Entity,
-    children: &Children,
-    node: &mut Node,
-    slider: &mut Slider,
-    _view_width: f32,
-    commands: &mut Commands,
-) {
-    // Cancel the drag - need to rotate back and reset position
-    rotate_first_to_end(track, children, commands);
-    slider.current = (slider.current + 1) % slider.page_count;
-    node.left = Val::Px(0.0);
-    slider.post_action = PostAction::None;
-}
 
 fn rotate_first_to_end(track: Entity, children: &Children, commands: &mut Commands) {
     if children.is_empty() {
