@@ -1417,6 +1417,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "bevy_ui_carousel"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "log",
+ "tracing",
+]
+
+[[package]]
 name = "bevy_ui_render"
 version = "0.17.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1444,15 +1453,6 @@ dependencies = [
  "bevy_utils",
  "bytemuck",
  "derive_more",
- "tracing",
-]
-
-[[package]]
-name = "bevy_ui_slider"
-version = "0.1.0"
-dependencies = [
- "bevy",
- "log",
  "tracing",
 ]
 
