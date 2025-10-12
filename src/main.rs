@@ -72,15 +72,7 @@ enum PostAction {
 
 #[derive(Resource, Default)]
 struct DragState {
-    touch: Option<TouchDrag>,
     mouse: Option<MouseDrag>,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct TouchDrag {
-    id: u64,
-    start: Vec2,
-    start_left: f32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -107,7 +99,6 @@ fn main() {
             Update,
             (
                 keyboard_nav,
-                drag_nav,
                 process_pending_steps,
                 tick_slide_anim,
                 handle_window_resize,
@@ -116,8 +107,9 @@ fn main() {
         )
         .add_observer(on_prev_click)
         .add_observer(on_next_click)
-        .add_observer(on_track_press)
-        .add_observer(on_track_release)
+        .add_observer(on_track_drag_start)
+        .add_observer(on_track_drag)
+        .add_observer(on_track_drag_end)
         .run();
 }
 
@@ -298,70 +290,9 @@ fn keyboard_nav(
     }
 }
 
-fn drag_nav(
-    mut ev_cursor: EventReader<CursorMoved>,
-    mut drag: ResMut<DragState>,
-    mut q: Query<
-        (
-            Entity,
-            &Children,
-            &mut Node,
-            &mut Slider,
-            Option<&SlideAnim>,
-        ),
-        With<PageTrack>,
-    >,
-    mut commands: Commands,
-) {
-    let Ok((track_e, children, mut node, mut slider, animator)) = q.single_mut() else {
-        return;
-    };
-    let view_width = slider.view_w;
-
-    if animator.is_some() {
-        return;
-    }
-
-    for ev in ev_cursor.read() {
-        if let Some(md) = drag.mouse {
-            if md.start.is_none() {
-                if let Some(m) = drag.mouse.as_mut() {
-                    m.start = Some(ev.position);
-                }
-            }
-            let start = drag
-                .mouse
-                .as_ref()
-                .and_then(|m| m.start)
-                .unwrap_or(ev.position);
-            let dx = ev.position.x - start.x;
-            let mut left = md.start_left + dx;
-
-            while left > 0.0 {
-                rotate_last_to_front(track_e, children, &mut commands);
-                left -= view_width;
-                slider.current = (slider.current + slider.page_count - 1) % slider.page_count;
-                if let Some(m) = drag.mouse.as_mut() {
-                    m.start_left -= view_width;
-                }
-            }
-            while left < -view_width {
-                rotate_first_to_end(track_e, children, &mut commands);
-                left += view_width;
-                slider.current = (slider.current + 1) % slider.page_count;
-                if let Some(m) = drag.mouse.as_mut() {
-                    m.start_left += view_width;
-                }
-            }
-
-            node.left = Val::Px(left);
-        }
-    }
-}
-
-// Observer: start drag on track press
-fn on_track_press(
-    trigger: Trigger<Pointer<Pressed>>,
+// Observer: start drag on track (DragStart)
+fn on_track_drag_start(
+    trigger: Trigger<Pointer<DragStart>>,
     track_q: Query<(Entity, &Node), With<PageTrack>>,
     mut track_mut_q: Query<(&Children, &mut Slider, Option<&SlideAnim>), With<PageTrack>>,
     mut commands: Commands,
@@ -386,9 +317,66 @@ fn on_track_press(
     }
 }
 
-// Observer: end drag on track release
-fn on_track_release(
-    trigger: Trigger<Pointer<Released>>,
+// Observer: dragging over the track (Drag)
+fn on_track_drag(
+    trigger: Trigger<Pointer<Drag>>,
+    mut q: Query<
+        (
+            Entity,
+            &Children,
+            &mut Node,
+            &mut Slider,
+            Option<&SlideAnim>,
+        ),
+        With<PageTrack>,
+    >,
+    mut commands: Commands,
+    mut drag: ResMut<DragState>,
+) {
+    let Ok((track_e, children, mut node, mut slider, animator)) = q.single_mut() else {
+        return;
+    };
+
+    if animator.is_some() {
+        return;
+    }
+
+    if let Some(md) = drag.mouse {
+        let current = trigger.event().pointer_location.position;
+        if md.start.is_none() {
+            if let Some(m) = drag.mouse.as_mut() {
+                m.start = Some(current);
+            }
+        }
+        let start = drag.mouse.as_ref().and_then(|m| m.start).unwrap_or(current);
+        let dx = current.x - start.x;
+        let view_width = slider.view_w;
+        let mut left = md.start_left + dx;
+
+        while left > 0.0 {
+            rotate_last_to_front(track_e, children, &mut commands);
+            left -= view_width;
+            slider.current = (slider.current + slider.page_count - 1) % slider.page_count;
+            if let Some(m) = drag.mouse.as_mut() {
+                m.start_left -= view_width;
+            }
+        }
+        while left < -view_width {
+            rotate_first_to_end(track_e, children, &mut commands);
+            left += view_width;
+            slider.current = (slider.current + 1) % slider.page_count;
+            if let Some(m) = drag.mouse.as_mut() {
+                m.start_left += view_width;
+            }
+        }
+
+        node.left = Val::Px(left);
+    }
+}
+
+// Observer: end drag on track (DragEnd)
+fn on_track_drag_end(
+    trigger: Trigger<Pointer<DragEnd>>,
     mut track_q: Query<(Entity, &Children, &mut Node, &mut Slider), With<PageTrack>>,
     mut commands: Commands,
     mut drag: ResMut<DragState>,
@@ -409,16 +397,27 @@ fn on_track_release(
                 None => left - md.start_left,
             };
             let view_w = slider.view_w;
-            finalize_drag_release(
-                track_e,
-                children,
-                &mut node,
-                &mut slider,
-                &mut commands,
-                dx_total,
-                left_norm,
-                view_w,
-            );
+            let threshold_px = view_w * 0.05;
+
+            if dx_total <= -threshold_px {
+                // Commit to next page (dragged left sufficiently)
+                start_next_tween(track_e, &mut node, &mut slider, view_w, &mut commands);
+            } else if dx_total >= threshold_px {
+                // Commit to previous page (dragged right sufficiently)
+                if get_left_px(&node) >= 0.0 {
+                    rotate_last_to_front(track_e, children, &mut commands);
+                    slider.current = (slider.current + slider.page_count - 1) % slider.page_count;
+                    node.left = Val::Px(-view_w);
+                }
+                start_back_tween(track_e, &mut node, &mut slider, &mut commands);
+            } else {
+                // Not enough movement: snap to nearest anchor.
+                if -left_norm >= view_w * 0.5 {
+                    start_next_tween(track_e, &mut node, &mut slider, view_w, &mut commands);
+                } else {
+                    start_back_tween(track_e, &mut node, &mut slider, &mut commands);
+                }
+            }
         }
     }
 }
@@ -547,39 +546,6 @@ fn get_left_px(node: &Node) -> f32 {
     match node.left {
         Val::Px(v) => v,
         _ => 0.0,
-    }
-}
-
-fn finalize_drag_release(
-    track: Entity,
-    children: &Children,
-    node: &mut Node,
-    slider: &mut Slider,
-    commands: &mut Commands,
-    dx_total: f32,
-    left: f32,
-    view_width: f32,
-) {
-    let threshold_px = view_width * 0.05;
-
-    if dx_total <= -threshold_px {
-        // Commit to next page (dragged left sufficiently)
-        start_next_tween(track, node, slider, view_width, commands);
-    } else if dx_total >= threshold_px {
-        // Commit to previous page (dragged right sufficiently)
-        if get_left_px(node) >= 0.0 {
-            rotate_last_to_front(track, children, commands);
-            slider.current = (slider.current + slider.page_count - 1) % slider.page_count;
-            node.left = Val::Px(-view_width);
-        }
-        start_back_tween(track, node, slider, commands);
-    } else {
-        // Not enough movement: snap to nearest anchor.
-        if -left >= view_width * 0.5 {
-            start_next_tween(track, node, slider, view_width, commands);
-        } else {
-            start_back_tween(track, node, slider, commands);
-        }
     }
 }
 
