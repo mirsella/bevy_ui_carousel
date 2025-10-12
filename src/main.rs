@@ -5,6 +5,12 @@ use bevy::prelude::*;
 use bevy::ui::{BackgroundColor, Node, Overflow, OverflowAxis, ZIndex};
 use bevy::window::WindowResized;
 
+// Tunables
+const SLIDE_DURATION_MS: u64 = 200;
+const SLIDE_EASE: EaseFunction = EaseFunction::CubicOut;
+const DRAG_COMMIT_THRESHOLD_FRAC: f32 = 0.05; // of view width
+const SNAP_HALF_FRAC: f32 = 0.5; // snap to next if passed halfway
+
 // Simple custom slide animation to avoid scheduling/event race issues.
 #[derive(Component, Debug)]
 struct SlideAnim {
@@ -46,9 +52,6 @@ impl NodeLeftLens {
 }
 
 #[derive(Component)]
-struct Viewport;
-
-#[derive(Component)]
 struct PageTrack;
 
 #[derive(Component)]
@@ -70,12 +73,7 @@ enum PostAction {
     RotateFirstToEndResetToZero,
 }
 
-#[derive(Resource, Default)]
-struct DragState {
-    mouse: Option<MouseDrag>,
-}
-
-#[derive(Debug, Clone, Copy)]
+#[derive(Component, Debug, Clone, Copy)]
 struct MouseDrag {
     start: Vec2,
     start_left: f32,
@@ -90,7 +88,6 @@ struct NavNextBtn;
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins)
-        .init_resource::<DragState>()
         .insert_resource(UiPickingSettings {
             require_markers: true,
         })
@@ -110,6 +107,7 @@ fn main() {
         .add_observer(on_track_drag_start)
         .add_observer(on_track_drag)
         .add_observer(on_track_drag_end)
+        .add_observer(on_track_drag_cancel)
         .run();
 }
 
@@ -130,7 +128,7 @@ fn setup(mut commands: Commands, windows: Query<&Window>) {
         })
         .id();
 
-    // Viewport
+    // Viewport (container with overflow clip)
     let viewport = commands
         .spawn((
             Node {
@@ -143,7 +141,6 @@ fn setup(mut commands: Commands, windows: Query<&Window>) {
                 ..default()
             },
             BackgroundColor(Color::srgba(0.05, 0.06, 0.08, 1.0)),
-            Viewport,
         ))
         .id();
 
@@ -296,7 +293,6 @@ fn on_track_drag_start(
     track_q: Query<(Entity, &Node), With<PageTrack>>,
     mut track_mut_q: Query<(&Children, &mut Slider, Option<&SlideAnim>), With<PageTrack>>,
     mut commands: Commands,
-    mut drag: ResMut<DragState>,
 ) {
     let Ok((track_e, node)) = track_q.single() else {
         return;
@@ -310,7 +306,7 @@ fn on_track_drag_start(
             commands.entity(track_e).remove::<SlideAnim>();
             slider.post_action = PostAction::None;
         }
-        drag.mouse = Some(MouseDrag {
+        commands.entity(track_e).insert(MouseDrag {
             start: trigger.event().pointer_location.position,
             start_left: get_left_px(node),
         });
@@ -327,13 +323,13 @@ fn on_track_drag(
             &mut Node,
             &mut Slider,
             Option<&SlideAnim>,
+            Option<&mut MouseDrag>,
         ),
         With<PageTrack>,
     >,
     mut commands: Commands,
-    mut drag: ResMut<DragState>,
 ) {
-    let Ok((track_e, children, mut node, mut slider, animator)) = q.single_mut() else {
+    let Ok((track_e, children, mut node, mut slider, animator, mouse_drag)) = q.single_mut() else {
         return;
     };
 
@@ -341,7 +337,7 @@ fn on_track_drag(
         return;
     }
 
-    if let Some(md) = drag.mouse {
+    if let Some(mut md) = mouse_drag {
         let current = trigger.event().pointer_location.position;
         let dx = current.x - md.start.x;
         let view_width = slider.view_w;
@@ -351,17 +347,13 @@ fn on_track_drag(
             rotate_last_to_front(track_e, children, &mut commands);
             left -= view_width;
             slider.current = (slider.current + slider.page_count - 1) % slider.page_count;
-            if let Some(m) = drag.mouse.as_mut() {
-                m.start_left -= view_width;
-            }
+            md.start_left -= view_width;
         }
         while left < -view_width {
             rotate_first_to_end(track_e, children, &mut commands);
             left += view_width;
             slider.current = (slider.current + 1) % slider.page_count;
-            if let Some(m) = drag.mouse.as_mut() {
-                m.start_left += view_width;
-            }
+            md.start_left += view_width;
         }
 
         node.left = Val::Px(left);
@@ -371,46 +363,24 @@ fn on_track_drag(
 // Observer: end drag on track (DragEnd)
 fn on_track_drag_end(
     trigger: Trigger<Pointer<DragEnd>>,
-    mut track_q: Query<(Entity, &Children, &mut Node, &mut Slider), With<PageTrack>>,
+    mut track_q: Query<
+        (
+            Entity,
+            &Children,
+            &mut Node,
+            &mut Slider,
+            Option<&MouseDrag>,
+        ),
+        With<PageTrack>,
+    >,
     mut commands: Commands,
-    mut drag: ResMut<DragState>,
 ) {
-    if let Ok((track_e, children, mut node, mut slider)) = track_q.single_mut() {
-        if trigger.target() != track_e {
-            return;
-        }
-        if let Some(md) = drag.mouse.take() {
-            let left = get_left_px(&node);
-            let mut left_norm = left;
-            if left_norm > 0.0 {
-                left_norm -= slider.view_w;
-            }
-            let end_pos = trigger.event().pointer_location.position;
-            let dx_total = end_pos.x - md.start.x;
-            let view_w = slider.view_w;
-            let threshold_px = view_w * 0.05;
-
-            if dx_total <= -threshold_px {
-                // Commit to next page (dragged left sufficiently)
-                start_next_tween(track_e, &mut node, &mut slider, view_w, &mut commands);
-            } else if dx_total >= threshold_px {
-                // Commit to previous page (dragged right sufficiently)
-                if get_left_px(&node) >= 0.0 {
-                    rotate_last_to_front(track_e, children, &mut commands);
-                    slider.current = (slider.current + slider.page_count - 1) % slider.page_count;
-                    node.left = Val::Px(-view_w);
-                }
-                start_back_tween(track_e, &mut node, &mut slider, &mut commands);
-            } else {
-                // Not enough movement: snap to nearest anchor.
-                if -left_norm >= view_w * 0.5 {
-                    start_next_tween(track_e, &mut node, &mut slider, view_w, &mut commands);
-                } else {
-                    start_back_tween(track_e, &mut node, &mut slider, &mut commands);
-                }
-            }
-        }
-    }
+    handle_drag_finish_like(
+        trigger.target(),
+        &mut track_q,
+        &mut commands,
+        Some(trigger.event().pointer_location.position),
+    );
 }
 
 fn process_pending_steps(
@@ -421,16 +391,17 @@ fn process_pending_steps(
             &mut Node,
             &mut Slider,
             Option<&SlideAnim>,
+            Option<&MouseDrag>,
         ),
         With<PageTrack>,
     >,
     mut commands: Commands,
 ) {
-    let Ok((entity, children, mut node, mut slider, animator)) = q.single_mut() else {
+    let Ok((entity, children, mut node, mut slider, animator, mouse_drag)) = q.single_mut() else {
         return;
     };
 
-    if animator.is_some() || slider.pending_steps == 0 {
+    if animator.is_some() || mouse_drag.is_some() || slider.pending_steps == 0 {
         return;
     }
 
@@ -446,6 +417,24 @@ fn process_pending_steps(
         node.left = Val::Px(-view_width);
         start_back_tween(entity, &mut node, &mut slider, &mut commands);
     }
+}
+
+// Observer: drag canceled (treat like end with no extra delta)
+fn on_track_drag_cancel(
+    trigger: Trigger<Pointer<Cancel>>,
+    mut track_q: Query<
+        (
+            Entity,
+            &Children,
+            &mut Node,
+            &mut Slider,
+            Option<&MouseDrag>,
+        ),
+        With<PageTrack>,
+    >,
+    mut commands: Commands,
+) {
+    handle_drag_finish_like(trigger.target(), &mut track_q, &mut commands, None);
 }
 
 // Handle slide animation progression and completion.
@@ -553,7 +542,7 @@ fn start_next_tween(
 
     commands
         .entity(track)
-        .insert(SlideAnim::new(start, end, 200, EaseFunction::CubicOut));
+        .insert(SlideAnim::new(start, end, SLIDE_DURATION_MS, SLIDE_EASE));
 }
 
 fn start_back_tween(track: Entity, node: &mut Node, slider: &mut Slider, commands: &mut Commands) {
@@ -563,7 +552,7 @@ fn start_back_tween(track: Entity, node: &mut Node, slider: &mut Slider, command
 
     commands
         .entity(track)
-        .insert(SlideAnim::new(start, end, 200, EaseFunction::CubicOut));
+        .insert(SlideAnim::new(start, end, SLIDE_DURATION_MS, SLIDE_EASE));
 }
 
 fn rotate_first_to_end(track: Entity, children: &Children, commands: &mut Commands) {
@@ -582,4 +571,58 @@ fn rotate_last_to_front(track: Entity, children: &Children, commands: &mut Comma
     let last = *children.last().unwrap();
     commands.entity(track).remove_children(&[last]);
     commands.entity(track).insert_children(0, &[last]);
+}
+
+// Shared logic for ending/canceling a drag
+fn handle_drag_finish_like(
+    target: Entity,
+    track_q: &mut Query<
+        (
+            Entity,
+            &Children,
+            &mut Node,
+            &mut Slider,
+            Option<&MouseDrag>,
+        ),
+        With<PageTrack>,
+    >,
+    commands: &mut Commands,
+    end_pos_opt: Option<Vec2>,
+) {
+    if let Ok((track_e, children, mut node, mut slider, mouse_drag)) = track_q.single_mut() {
+        if target != track_e {
+            return;
+        }
+        if let Some(md) = mouse_drag {
+            let left = get_left_px(&node);
+            let mut left_norm = left;
+            if left_norm > 0.0 {
+                left_norm -= slider.view_w;
+            }
+            let view_w = slider.view_w;
+            let dx_total = if let Some(end_pos) = end_pos_opt {
+                end_pos.x - md.start.x
+            } else {
+                // Cancel: treat as zero movement to snap to nearest
+                0.0
+            };
+            let threshold_px = view_w * DRAG_COMMIT_THRESHOLD_FRAC;
+
+            if dx_total <= -threshold_px {
+                start_next_tween(track_e, &mut node, &mut slider, view_w, commands);
+            } else if dx_total >= threshold_px {
+                if get_left_px(&node) >= 0.0 {
+                    rotate_last_to_front(track_e, children, commands);
+                    slider.current = (slider.current + slider.page_count - 1) % slider.page_count;
+                    node.left = Val::Px(-view_w);
+                }
+                start_back_tween(track_e, &mut node, &mut slider, commands);
+            } else if -left_norm >= view_w * SNAP_HALF_FRAC {
+                start_next_tween(track_e, &mut node, &mut slider, view_w, commands);
+            } else {
+                start_back_tween(track_e, &mut node, &mut slider, commands);
+            }
+            commands.entity(track_e).remove::<MouseDrag>();
+        }
+    }
 }
