@@ -1,7 +1,7 @@
 use bevy::color::palettes::css;
 use bevy::input::touch::{TouchInput, TouchPhase};
 use bevy::prelude::*;
-use bevy::ui::{BackgroundColor, Node, Overflow, OverflowAxis};
+use bevy::ui::{BackgroundColor, Node, Overflow, OverflowAxis, ZIndex};
 use bevy::window::WindowResized;
 use bevy::math::curve::easing::EaseFunction;
 
@@ -96,16 +96,17 @@ fn main() {
         .init_resource::<DragState>()
         .add_systems(Startup, setup)
         .add_systems(
-        Update,
-        (
-            nav_buttons,
-            keyboard_nav,
-            drag_nav,
-            process_pending_steps,
-            tick_slide_anim,
-            handle_window_resize,
-        ),
-    )
+            Update,
+            (
+                nav_buttons,
+                keyboard_nav,
+                drag_nav,
+                process_pending_steps,
+                tick_slide_anim,
+                handle_window_resize,
+            )
+                .chain(),
+        )
         .run();
 }
 
@@ -203,6 +204,7 @@ fn setup(mut commands: Commands, windows: Query<&Window>) {
                 ..default()
             },
             BackgroundColor(Color::NONE),
+            ZIndex(1),
         ))
         .id();
 
@@ -290,23 +292,21 @@ fn drag_nav(
     };
     let view_width = slider.view_w;
 
-    // Cancel animation immediately when user starts a new drag for responsive interaction
-    if animator.is_some() {
-        let any_new_drag = ev_touches.read().any(|ev| matches!(ev.phase, TouchPhase::Started))
-            || mouse_buttons.just_pressed(MouseButton::Left);
-        
-        if any_new_drag {
-            commands.entity(track_e).remove::<SlideAnim>();
-            slider.post_action = PostAction::None;
-        } else {
-            return; // Animation running, no new drag started
-        }
+    let touch_events: Vec<_> = ev_touches.read().collect();
+
+    let any_new_drag = touch_events.iter().any(|ev| matches!(ev.phase, TouchPhase::Started))
+        || mouse_buttons.just_pressed(MouseButton::Left);
+
+    let mut animation_cancelled = false;
+    if animator.is_some() && any_new_drag {
+        commands.entity(track_e).remove::<SlideAnim>();
+        slider.post_action = PostAction::None;
+        animation_cancelled = true;
+    } else if animator.is_some() {
+        return;
     }
 
-
-
-    // touch
-    for ev in ev_touches.read() {
+    for ev in touch_events {
         match ev.phase {
             TouchPhase::Started => {
                 drag.touch = Some(TouchDrag {
@@ -322,13 +322,14 @@ fn drag_nav(
                     let dx = ev.position.x - td.start.x;
                     let mut left = td.start_left + dx;
 
-                    if left > 0.0 {
+                    while left > 0.0 {
                         rotate_last_to_front(track_e, children, &mut commands);
                         left -= view_width;
                         slider.current =
                             (slider.current + slider.page_count - 1) % slider.page_count;
                         drag.touch.as_mut().unwrap().start_left -= view_width;
-                    } else if left < -view_width {
+                    }
+                    while left < -view_width {
                         rotate_first_to_end(track_e, children, &mut commands);
                         left += view_width;
                         slider.current = (slider.current + 1) % slider.page_count;
@@ -344,11 +345,10 @@ fn drag_nav(
                     let dx_total = ev.position.x - td.start.x;
                     let mut left_norm = left;
                     if left_norm > 0.0 { left_norm -= view_width; }
-                    // If an animation is still running, just queue the step instead of forcing another tween
-                    if let Some(_a) = animator {
+                    
+                    if animator.is_some() && !animation_cancelled {
                         if dx_total <= -view_width * 0.05 { slider.pending_steps += 1; }
                         else if dx_total >= view_width * 0.05 { slider.pending_steps -= 1; }
-                        // else do nothing
                     } else {
                         finalize_drag_release(
                             track_e,
@@ -366,7 +366,6 @@ fn drag_nav(
         }
     }
 
-    // mouse
     for ev in ev_cursor.read() {
         if mouse_buttons.pressed(MouseButton::Left) {
             if drag.mouse.is_none() {
@@ -378,12 +377,13 @@ fn drag_nav(
                 let dx = ev.position.x - md.start.x;
                 let mut left = md.start_left + dx;
 
-                if left > 0.0 {
+                while left > 0.0 {
                     rotate_last_to_front(track_e, children, &mut commands);
                     left -= view_width;
                     slider.current = (slider.current + slider.page_count - 1) % slider.page_count;
                     drag.mouse.as_mut().unwrap().start_left -= view_width;
-                } else if left < -view_width {
+                }
+                while left < -view_width {
                     rotate_first_to_end(track_e, children, &mut commands);
                     left += view_width;
                     slider.current = (slider.current + 1) % slider.page_count;
@@ -405,7 +405,8 @@ fn drag_nav(
             };
             let mut left_norm = left;
             if left_norm > 0.0 { left_norm -= view_width; }
-            if animator.is_some() {
+            
+            if animator.is_some() && !animation_cancelled {
                 if dx_total <= -view_width * 0.05 { slider.pending_steps += 1; }
                 else if dx_total >= view_width * 0.05 { slider.pending_steps -= 1; }
             } else {
@@ -507,6 +508,8 @@ fn handle_window_resize(
         let Ok((entity, children, mut track_node, mut slider, anim)) = q.single_mut() else {
             return;
         };
+        
+        let old_view_w = slider.view_w;
         slider.view_w = view_w;
         track_node.width = Val::Px(slider.page_count as f32 * view_w);
 
@@ -516,11 +519,15 @@ fn handle_window_resize(
             }
         }
 
-        // Cancel any ongoing animation and reset positioning
         if anim.is_some() {
             commands.entity(entity).remove::<SlideAnim>();
         }
-        track_node.left = Val::Px(0.0);
+        
+        let current_left = get_left_px(&track_node);
+        let normalized_pos = current_left / old_view_w;
+        let new_left = normalized_pos * view_w;
+        track_node.left = Val::Px(new_left);
+        
         slider.post_action = PostAction::None;
     }
 }
