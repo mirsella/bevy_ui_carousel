@@ -77,7 +77,7 @@ struct DragState {
 
 #[derive(Debug, Clone, Copy)]
 struct MouseDrag {
-    start: Option<Vec2>,
+    start: Vec2,
     start_left: f32,
 }
 
@@ -311,7 +311,7 @@ fn on_track_drag_start(
             slider.post_action = PostAction::None;
         }
         drag.mouse = Some(MouseDrag {
-            start: Some(trigger.event().pointer_location.position),
+            start: trigger.event().pointer_location.position,
             start_left: get_left_px(node),
         });
     }
@@ -343,13 +343,7 @@ fn on_track_drag(
 
     if let Some(md) = drag.mouse {
         let current = trigger.event().pointer_location.position;
-        if md.start.is_none() {
-            if let Some(m) = drag.mouse.as_mut() {
-                m.start = Some(current);
-            }
-        }
-        let start = drag.mouse.as_ref().and_then(|m| m.start).unwrap_or(current);
-        let dx = current.x - start.x;
+        let dx = current.x - md.start.x;
         let view_width = slider.view_w;
         let mut left = md.start_left + dx;
 
@@ -392,10 +386,7 @@ fn on_track_drag_end(
                 left_norm -= slider.view_w;
             }
             let end_pos = trigger.event().pointer_location.position;
-            let dx_total = match md.start {
-                Some(start) => end_pos.x - start.x,
-                None => left - md.start_left,
-            };
+            let dx_total = end_pos.x - md.start.x;
             let view_w = slider.view_w;
             let threshold_px = view_w * 0.05;
 
