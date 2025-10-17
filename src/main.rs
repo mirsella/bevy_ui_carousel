@@ -2,7 +2,7 @@ use bevy::color::palettes::css;
 use bevy::math::curve::easing::EaseFunction;
 use bevy::picking::prelude::*;
 use bevy::prelude::*;
-use bevy::ui::{BackgroundColor, Node, Overflow, OverflowAxis, ZIndex};
+use bevy::ui::{BackgroundColor, Node, Overflow, OverflowAxis};
 use bevy::window::WindowResized;
 
 // Tunables
@@ -79,12 +79,6 @@ struct MouseDrag {
     start_left: f32,
 }
 
-#[derive(Component)]
-struct NavPrevBtn;
-
-#[derive(Component)]
-struct NavNextBtn;
-
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins)
@@ -102,12 +96,6 @@ fn main() {
             )
                 .chain(),
         )
-        .add_observer(on_prev_click)
-        .add_observer(on_next_click)
-        .add_observer(on_track_drag_start)
-        .add_observer(on_track_drag)
-        .add_observer(on_track_drag_end)
-        .add_observer(on_track_drag_cancel)
         .run();
 }
 
@@ -167,6 +155,10 @@ fn setup(mut commands: Commands, windows: Query<&Window>) {
                 post_action: PostAction::None,
             },
         ))
+        .observe(on_track_drag_start)
+        .observe(on_track_drag)
+        .observe(on_track_drag_end)
+        .observe(on_track_drag_cancel)
         .id();
 
     commands.entity(root).add_child(viewport);
@@ -189,81 +181,6 @@ fn setup(mut commands: Commands, windows: Query<&Window>) {
             ));
         });
     }
-
-    // Bottom nav bar
-    let nav_bar = commands
-        .spawn((
-            Node {
-                position_type: PositionType::Absolute,
-                bottom: Val::Px(16.0),
-                left: Val::Percent(0.0),
-                width: Val::Percent(100.0),
-                height: Val::Px(60.0),
-                justify_content: JustifyContent::Center,
-                align_items: AlignItems::Center,
-                column_gap: Val::Px(16.0),
-                ..default()
-            },
-            BackgroundColor(Color::NONE),
-            ZIndex(1),
-        ))
-        .id();
-
-    let btn_node = Node {
-        width: Val::Px(140.0),
-        height: Val::Px(44.0),
-        justify_content: JustifyContent::Center,
-        align_items: AlignItems::Center,
-        ..default()
-    };
-
-    commands.entity(root).add_child(nav_bar);
-    commands.entity(nav_bar).with_children(|p| {
-        p.spawn((
-            Button,
-            btn_node.clone(),
-            BackgroundColor(Color::srgba(0.2, 0.2, 0.25, 0.9)),
-            NavPrevBtn,
-            Pickable::default(),
-        ));
-        p.spawn((
-            Button,
-            btn_node,
-            BackgroundColor(Color::srgba(0.2, 0.2, 0.25, 0.9)),
-            NavNextBtn,
-            Pickable::default(),
-        ));
-    });
-}
-
-// Observer: previous button clicked
-fn on_prev_click(
-    trigger: Trigger<Pointer<Click>>,
-    btn_q: Query<(), With<NavPrevBtn>>,
-    mut track_q: Query<(&mut Slider, Option<&SlideAnim>), With<PageTrack>>,
-) {
-    if btn_q.get(trigger.target()).is_err() {
-        return;
-    }
-    let Ok((mut slider, _anim)) = track_q.single_mut() else {
-        return;
-    };
-    slider.pending_steps -= 1;
-}
-
-// Observer: next button clicked
-fn on_next_click(
-    trigger: Trigger<Pointer<Click>>,
-    btn_q: Query<(), With<NavNextBtn>>,
-    mut track_q: Query<(&mut Slider, Option<&SlideAnim>), With<PageTrack>>,
-) {
-    if btn_q.get(trigger.target()).is_err() {
-        return;
-    }
-    let Ok((mut slider, _anim)) = track_q.single_mut() else {
-        return;
-    };
-    slider.pending_steps += 1;
 }
 
 fn keyboard_nav(
@@ -290,46 +207,41 @@ fn keyboard_nav(
 // Observer: start drag on track (DragStart)
 fn on_track_drag_start(
     trigger: Trigger<Pointer<DragStart>>,
-    track_q: Query<(Entity, &Node), With<PageTrack>>,
-    mut track_mut_q: Query<(&Children, &mut Slider, Option<&SlideAnim>), With<PageTrack>>,
+    mut slider: Query<&mut Slider>,
+    node: Query<&Node>,
     mut commands: Commands,
 ) {
-    let Ok((track_e, node)) = track_q.single() else {
+    let track_e = trigger.target();
+    let Ok(track_node) = node.get(track_e) else {
         return;
     };
-    if trigger.target() != track_e {
+    let Ok(mut slider) = slider.get_mut(track_e) else {
         return;
-    }
+    };
 
-    if let Ok((_children, mut slider, animator)) = track_mut_q.single_mut() {
-        if animator.is_some() {
-            commands.entity(track_e).remove::<SlideAnim>();
-            slider.post_action = PostAction::None;
-        }
-        commands.entity(track_e).insert(MouseDrag {
-            start: trigger.event().pointer_location.position,
-            start_left: get_left_px(node),
-        });
-    }
+    commands.entity(track_e).remove::<SlideAnim>();
+    slider.post_action = PostAction::None;
+
+    commands.entity(track_e).insert(MouseDrag {
+        start: trigger.event().pointer_location.position,
+        start_left: get_left_px(track_node),
+    });
 }
 
 // Observer: dragging over the track (Drag)
 fn on_track_drag(
     trigger: Trigger<Pointer<Drag>>,
-    mut q: Query<
-        (
-            Entity,
-            &Children,
-            &mut Node,
-            &mut Slider,
-            Option<&SlideAnim>,
-            Option<&mut MouseDrag>,
-        ),
-        With<PageTrack>,
-    >,
+    mut q: Query<(
+        &Children,
+        &mut Node,
+        &mut Slider,
+        Option<&SlideAnim>,
+        Option<&mut MouseDrag>,
+    )>,
     mut commands: Commands,
 ) {
-    let Ok((track_e, children, mut node, mut slider, animator, mouse_drag)) = q.single_mut() else {
+    let track_e = trigger.target();
+    let Ok((children, mut node, mut slider, animator, mouse_drag)) = q.get_mut(track_e) else {
         return;
     };
 
@@ -363,20 +275,12 @@ fn on_track_drag(
 // Observer: end drag on track (DragEnd)
 fn on_track_drag_end(
     trigger: Trigger<Pointer<DragEnd>>,
-    mut track_q: Query<
-        (
-            Entity,
-            &Children,
-            &mut Node,
-            &mut Slider,
-            Option<&MouseDrag>,
-        ),
-        With<PageTrack>,
-    >,
+    mut track_q: Query<(&Children, &mut Node, &mut Slider, Option<&MouseDrag>)>,
     mut commands: Commands,
 ) {
+    let track_e = trigger.target();
     handle_drag_finish_like(
-        trigger.target(),
+        track_e,
         &mut track_q,
         &mut commands,
         Some(trigger.event().pointer_location.position),
@@ -422,19 +326,11 @@ fn process_pending_steps(
 // Observer: drag canceled (treat like end with no extra delta)
 fn on_track_drag_cancel(
     trigger: Trigger<Pointer<Cancel>>,
-    mut track_q: Query<
-        (
-            Entity,
-            &Children,
-            &mut Node,
-            &mut Slider,
-            Option<&MouseDrag>,
-        ),
-        With<PageTrack>,
-    >,
+    mut track_q: Query<(&Children, &mut Node, &mut Slider, Option<&MouseDrag>)>,
     mut commands: Commands,
 ) {
-    handle_drag_finish_like(trigger.target(), &mut track_q, &mut commands, None);
+    let track_e = trigger.target();
+    handle_drag_finish_like(track_e, &mut track_q, &mut commands, None);
 }
 
 // Handle slide animation progression and completion.
@@ -575,54 +471,40 @@ fn rotate_last_to_front(track: Entity, children: &Children, commands: &mut Comma
 
 // Shared logic for ending/canceling a drag
 fn handle_drag_finish_like(
-    target: Entity,
-    track_q: &mut Query<
-        (
-            Entity,
-            &Children,
-            &mut Node,
-            &mut Slider,
-            Option<&MouseDrag>,
-        ),
-        With<PageTrack>,
-    >,
+    track_e: Entity,
+    track_q: &mut Query<(&Children, &mut Node, &mut Slider, Option<&MouseDrag>)>,
     commands: &mut Commands,
     end_pos_opt: Option<Vec2>,
 ) {
-    if let Ok((track_e, children, mut node, mut slider, mouse_drag)) = track_q.single_mut() {
-        if target != track_e {
-            return;
+    if let Ok((children, mut node, mut slider, Some(md))) = track_q.get_mut(track_e) {
+        let left = get_left_px(&node);
+        let mut left_norm = left;
+        if left_norm > 0.0 {
+            left_norm -= slider.view_w;
         }
-        if let Some(md) = mouse_drag {
-            let left = get_left_px(&node);
-            let mut left_norm = left;
-            if left_norm > 0.0 {
-                left_norm -= slider.view_w;
-            }
-            let view_w = slider.view_w;
-            let dx_total = if let Some(end_pos) = end_pos_opt {
-                end_pos.x - md.start.x
-            } else {
-                // Cancel: treat as zero movement to snap to nearest
-                0.0
-            };
-            let threshold_px = view_w * DRAG_COMMIT_THRESHOLD_FRAC;
+        let view_w = slider.view_w;
+        let dx_total = if let Some(end_pos) = end_pos_opt {
+            end_pos.x - md.start.x
+        } else {
+            // Cancel: treat as zero movement to snap to nearest
+            0.0
+        };
+        let threshold_px = view_w * DRAG_COMMIT_THRESHOLD_FRAC;
 
-            if dx_total <= -threshold_px {
-                start_next_tween(track_e, &mut node, &mut slider, view_w, commands);
-            } else if dx_total >= threshold_px {
-                if get_left_px(&node) >= 0.0 {
-                    rotate_last_to_front(track_e, children, commands);
-                    slider.current = (slider.current + slider.page_count - 1) % slider.page_count;
-                    node.left = Val::Px(-view_w);
-                }
-                start_back_tween(track_e, &mut node, &mut slider, commands);
-            } else if -left_norm >= view_w * SNAP_HALF_FRAC {
-                start_next_tween(track_e, &mut node, &mut slider, view_w, commands);
-            } else {
-                start_back_tween(track_e, &mut node, &mut slider, commands);
+        if dx_total <= -threshold_px {
+            start_next_tween(track_e, &mut node, &mut slider, view_w, commands);
+        } else if dx_total >= threshold_px {
+            if get_left_px(&node) >= 0.0 {
+                rotate_last_to_front(track_e, children, commands);
+                slider.current = (slider.current + slider.page_count - 1) % slider.page_count;
+                node.left = Val::Px(-view_w);
             }
-            commands.entity(track_e).remove::<MouseDrag>();
+            start_back_tween(track_e, &mut node, &mut slider, commands);
+        } else if -left_norm >= view_w * SNAP_HALF_FRAC {
+            start_next_tween(track_e, &mut node, &mut slider, view_w, commands);
+        } else {
+            start_back_tween(track_e, &mut node, &mut slider, commands);
         }
+        commands.entity(track_e).remove::<MouseDrag>();
     }
 }
