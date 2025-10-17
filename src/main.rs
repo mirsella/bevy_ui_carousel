@@ -259,12 +259,22 @@ fn on_track_drag(
         let mut left = md.start_left + dx;
 
         while left > 0.0 {
+            tracing::info!(
+                "on_track_drag: rotating LAST to front, left={left:.1}, current={} -> {}",
+                slider.current,
+                (slider.current + slider.page_count - 1) % slider.page_count
+            );
             rotate_last_to_front(track_e, children, &mut commands);
             left -= view_width;
             slider.current = (slider.current + slider.page_count - 1) % slider.page_count;
             md.start_left -= view_width;
         }
         while left < -view_width {
+            tracing::info!(
+                "on_track_drag: rotating FIRST to end, left={left:.1}, current={} -> {}",
+                slider.current,
+                (slider.current + 1) % slider.page_count
+            );
             rotate_first_to_end(track_e, children, &mut commands);
             left += view_width;
             slider.current = (slider.current + 1) % slider.page_count;
@@ -362,10 +372,17 @@ fn handle_drag_finish_like(
             start_next_tween(track_e, &mut node, &mut slider, view_w, commands);
         } else if dx_total >= threshold_px {
             if get_left_px(&node) >= 0.0 {
+                tracing::info!(
+                    "handle_drag_finish: EXTRA rotation needed, left={:.1}, current={} -> {}",
+                    get_left_px(&node),
+                    slider.current,
+                    (slider.current + slider.page_count - 1) % slider.page_count
+                );
                 rotate_last_to_front(track_e, children, commands);
                 slider.current = (slider.current + slider.page_count - 1) % slider.page_count;
                 node.left = Val::Px(-view_w);
             }
+            tracing::info!("handle_drag_finish: calling start_back_tween, dx_total={dx_total:.1}, left={:.1}, current={}", get_left_px(&node), slider.current);
             start_back_tween(track_e, &mut node, &mut slider, commands);
         } else if -left_norm >= view_w * SNAP_HALF_FRAC {
             start_next_tween(track_e, &mut node, &mut slider, view_w, commands);
@@ -396,6 +413,10 @@ fn start_next_tween(
     let end = -view_width;
     slider.post_action = PostAction::RotateFirstToEndResetToZero;
 
+    // Cancel any existing animation by removing the timer component
+    // This prevents old animations' post_actions from executing
+    commands.entity(track).remove::<SlideTweenTimer>();
+
     let target = track.into_target();
     commands.entity(track).animation().insert_tween_here(
         Duration::from_millis(SLIDE_DURATION_MS),
@@ -415,6 +436,14 @@ fn start_back_tween(track: Entity, node: &mut Node, slider: &mut Slider, command
     let start = get_left_px(node);
     let end = 0.0;
     slider.post_action = PostAction::None;
+    tracing::info!(
+        "start_back_tween: start={start:.1}, end={end}, current={}",
+        slider.current
+    );
+
+    // Cancel any existing animation by removing the timer component
+    // This prevents old animations' post_actions from executing
+    commands.entity(track).remove::<SlideTweenTimer>();
 
     let target = track.into_target();
     commands.entity(track).animation().insert_tween_here(
@@ -451,11 +480,21 @@ fn tick_slide_tween(
 
     timer.0.tick(time.delta());
     if timer.0.finished() {
+        let left_px = get_left_px(&node);
+        tracing::info!(
+            "tick_slide_tween COMPLETE: left_px={left_px:.1}, post_action={:?}, current={}",
+            slider.post_action,
+            slider.current
+        );
         // complete any pending post action
         if slider.post_action == PostAction::RotateFirstToEndResetToZero {
             rotate_first_to_end(track_e, children, &mut commands);
             slider.current = (slider.current + 1) % slider.page_count;
             node.left = Val::Px(0.0);
+            tracing::info!(
+                "tick_slide_tween ROTATED forward, current now {}",
+                slider.current
+            );
         }
         slider.post_action = PostAction::None;
         commands.entity(track_e).remove::<SlideTweenTimer>();
