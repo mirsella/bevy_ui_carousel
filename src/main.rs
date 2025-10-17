@@ -58,6 +58,9 @@ struct MouseDrag {
     start_left: f32,
 }
 
+#[derive(Component)]
+struct SlideTweenTimer(Timer);
+
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins)
@@ -72,7 +75,7 @@ fn main() {
             (
                 keyboard_nav,
                 process_pending_steps,
-                handle_animation_completion,
+                tick_slide_tween,
                 handle_window_resize,
             )
                 .chain(),
@@ -180,9 +183,9 @@ fn handle_window_resize(
 
 fn keyboard_nav(
     keys: Res<ButtonInput<KeyCode>>,
-    mut q: Query<(&mut Slider, Has<AnimationPlayer>), With<PageTrack>>,
+    mut q: Query<(&mut Slider, Has<SlideTweenTimer>), With<PageTrack>>,
 ) {
-    let Ok((mut slider, _has_animator)) = q.single_mut() else {
+    let Ok((mut slider, _animating)) = q.single_mut() else {
         return;
     };
 
@@ -205,8 +208,14 @@ fn on_track_drag_start(
     mut slider: Query<&mut Slider>,
     node: Query<&Node>,
     mut commands: Commands,
+    animating_q: Query<(), With<SlideTweenTimer>>,
 ) {
     let track_e = trigger.target();
+    // If an animation is running, ignore drag start
+    if animating_q.get(track_e).is_ok() {
+        return;
+    }
+
     let Ok(track_node) = node.get(track_e) else {
         return;
     };
@@ -214,7 +223,6 @@ fn on_track_drag_start(
         return;
     };
 
-    commands.entity(track_e).remove::<AnimationPlayer>();
     slider.post_action = PostAction::None;
 
     commands.entity(track_e).insert(MouseDrag {
@@ -230,17 +238,17 @@ fn on_track_drag(
         &Children,
         &mut Node,
         &mut Slider,
-        Has<AnimationPlayer>,
+        Has<SlideTweenTimer>,
         Option<&mut MouseDrag>,
     )>,
     mut commands: Commands,
 ) {
     let track_e = trigger.target();
-    let Ok((children, mut node, mut slider, has_animator, mouse_drag)) = q.get_mut(track_e) else {
+    let Ok((children, mut node, mut slider, animating, mouse_drag)) = q.get_mut(track_e) else {
         return;
     };
 
-    if has_animator {
+    if animating {
         return;
     }
 
@@ -289,19 +297,18 @@ fn process_pending_steps(
             &Children,
             &mut Node,
             &mut Slider,
-            Has<AnimationPlayer>,
+            Has<SlideTweenTimer>,
             Option<&MouseDrag>,
         ),
         With<PageTrack>,
     >,
     mut commands: Commands,
 ) {
-    let Ok((entity, children, mut node, mut slider, has_animator, mouse_drag)) = q.single_mut()
-    else {
+    let Ok((entity, children, mut node, mut slider, animating, mouse_drag)) = q.single_mut() else {
         return;
     };
 
-    if has_animator || mouse_drag.is_some() || slider.pending_steps == 0 {
+    if animating || mouse_drag.is_some() || slider.pending_steps == 0 {
         return;
     }
 
@@ -395,6 +402,13 @@ fn start_next_tween(
         EaseKind::CubicOut,
         target.with(style_left(start, end)),
     );
+    // mark animating
+    commands
+        .entity(track)
+        .insert(SlideTweenTimer(Timer::from_seconds(
+            SLIDE_DURATION_MS as f32 / 1000.0,
+            TimerMode::Once,
+        )));
 }
 
 fn start_back_tween(track: Entity, node: &mut Node, slider: &mut Slider, commands: &mut Commands) {
@@ -408,33 +422,43 @@ fn start_back_tween(track: Entity, node: &mut Node, slider: &mut Slider, command
         EaseKind::CubicOut,
         target.with(style_left(start, end)),
     );
+    // mark animating
+    commands
+        .entity(track)
+        .insert(SlideTweenTimer(Timer::from_seconds(
+            SLIDE_DURATION_MS as f32 / 1000.0,
+            TimerMode::Once,
+        )));
 }
 
-fn handle_animation_completion(
+fn tick_slide_tween(
+    time: Res<Time>,
     mut q: Query<
         (
             Entity,
             &Children,
             &mut Node,
             &mut Slider,
-            Has<AnimationPlayer>,
+            &mut SlideTweenTimer,
         ),
         With<PageTrack>,
     >,
     mut commands: Commands,
 ) {
-    let Ok((track_e, children, mut node, mut slider, has_animator)) = q.single_mut() else {
+    let Ok((track_e, children, mut node, mut slider, mut timer)) = q.single_mut() else {
         return;
     };
 
-    // Check if animation just finished (post_action is set but no animator)
-    if !has_animator && slider.post_action != PostAction::None {
+    timer.0.tick(time.delta());
+    if timer.0.finished() {
+        // complete any pending post action
         if slider.post_action == PostAction::RotateFirstToEndResetToZero {
             rotate_first_to_end(track_e, children, &mut commands);
             slider.current = (slider.current + 1) % slider.page_count;
             node.left = Val::Px(0.0);
         }
         slider.post_action = PostAction::None;
+        commands.entity(track_e).remove::<SlideTweenTimer>();
     }
 }
 
