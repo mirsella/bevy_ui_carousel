@@ -16,4 +16,4 @@ A simple UI carousel built with Bevy, featuring smooth sliding animations and mu
 
 ## Demo
 
-![Demo video on youtube](https://youtu.be/Ra4cqBvcbsk)
+https://www.youtube.com/watch?v=Ra4cqBvcbsk
