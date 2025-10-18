@@ -4,7 +4,12 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-bevy = { version = "0.17" }
+bevy = { version = "0.17", features = [
+  "experimental_bevy_ui_widgets",
+  "dynamic_linking",
+  "detailed_trace",
+  "track_location",
+] }
 # Set max log levels. This helps avoid unwanted low-severity log spam, which can affect performance.
 log = { version = "0.4", features = [
   "max_level_debug",

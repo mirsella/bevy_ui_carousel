@@ -104,7 +104,7 @@ fn setup(mut commands: Commands, windows: Query<&Window>) {
     let Ok(window) = windows.single() else {
         return;
     };
-    let view_w = window.resolution.width();
+    let view_w = window.resolution.width() / window.resolution.scale_factor();
     let page_count = 3usize;
 
     // Root
