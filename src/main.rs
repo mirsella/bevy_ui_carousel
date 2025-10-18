@@ -278,7 +278,7 @@ fn on_track_drag_start(
     node: Query<&Node>,
     mut commands: Commands,
 ) {
-    let track_e = trigger.observer();
+    let track_e = trigger.entity;
     let Ok(track_node) = node.get(track_e) else {
         return;
     };
@@ -307,7 +307,7 @@ fn on_track_drag(
     )>,
     mut commands: Commands,
 ) {
-    let track_e = trigger.observer();
+    let track_e = trigger.entity;
     let Ok((children, mut node, mut slider, animator, mouse_drag)) = q.get_mut(track_e) else {
         return;
     };
@@ -345,7 +345,7 @@ fn on_track_drag_end(
     mut track_q: Query<(&Children, &mut Node, &mut Slider, Option<&MouseDrag>)>,
     mut commands: Commands,
 ) {
-    let track_e = trigger.observer();
+    let track_e = trigger.entity;
     handle_drag_finish_like(
         track_e,
         &mut track_q,
@@ -396,7 +396,7 @@ fn on_track_drag_cancel(
     mut track_q: Query<(&Children, &mut Node, &mut Slider, Option<&MouseDrag>)>,
     mut commands: Commands,
 ) {
-    let track_e = trigger.observer();
+    let track_e = trigger.entity;
     handle_drag_finish_like(track_e, &mut track_q, &mut commands, None);
 }
 
