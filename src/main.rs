@@ -100,7 +100,7 @@ fn main() {
 }
 
 fn setup(mut commands: Commands, windows: Query<&Window>) {
-    commands.spawn((Camera2d, UiPickingCamera));
+    commands.spawn((Camera2d, Camera::default(), Msaa::Sample4, UiPickingCamera));
     let Ok(window) = windows.single() else {
         return;
     };
@@ -230,7 +230,7 @@ fn setup(mut commands: Commands, windows: Query<&Window>) {
 
 // Observer: previous button clicked
 fn on_prev_click(
-    _trigger: Trigger<Pointer<Click>>,
+    _trigger: On<Pointer<Click>>,
     mut track_q: Query<(&mut Slider, Option<&SlideAnim>), With<PageTrack>>,
 ) {
     let Ok((mut slider, _anim)) = track_q.single_mut() else {
@@ -241,7 +241,7 @@ fn on_prev_click(
 
 // Observer: next button clicked
 fn on_next_click(
-    _trigger: Trigger<Pointer<Click>>,
+    _trigger: On<Pointer<Click>>,
     mut track_q: Query<(&mut Slider, Option<&SlideAnim>), With<PageTrack>>,
 ) {
     let Ok((mut slider, _anim)) = track_q.single_mut() else {
@@ -273,12 +273,12 @@ fn keyboard_nav(
 
 // Observer: start drag on track (DragStart)
 fn on_track_drag_start(
-    trigger: Trigger<Pointer<DragStart>>,
+    trigger: On<Pointer<DragStart>>,
     mut slider: Query<&mut Slider>,
     node: Query<&Node>,
     mut commands: Commands,
 ) {
-    let track_e = trigger.target();
+    let track_e = trigger.observer();
     let Ok(track_node) = node.get(track_e) else {
         return;
     };
@@ -297,7 +297,7 @@ fn on_track_drag_start(
 
 // Observer: dragging over the track (Drag)
 fn on_track_drag(
-    trigger: Trigger<Pointer<Drag>>,
+    trigger: On<Pointer<Drag>>,
     mut q: Query<(
         &Children,
         &mut Node,
@@ -307,7 +307,7 @@ fn on_track_drag(
     )>,
     mut commands: Commands,
 ) {
-    let track_e = trigger.target();
+    let track_e = trigger.observer();
     let Ok((children, mut node, mut slider, animator, mouse_drag)) = q.get_mut(track_e) else {
         return;
     };
@@ -341,11 +341,11 @@ fn on_track_drag(
 
 // Observer: end drag on track (DragEnd)
 fn on_track_drag_end(
-    trigger: Trigger<Pointer<DragEnd>>,
+    trigger: On<Pointer<DragEnd>>,
     mut track_q: Query<(&Children, &mut Node, &mut Slider, Option<&MouseDrag>)>,
     mut commands: Commands,
 ) {
-    let track_e = trigger.target();
+    let track_e = trigger.observer();
     handle_drag_finish_like(
         track_e,
         &mut track_q,
@@ -392,11 +392,11 @@ fn process_pending_steps(
 
 // Observer: drag canceled (treat like end with no extra delta)
 fn on_track_drag_cancel(
-    trigger: Trigger<Pointer<Cancel>>,
+    trigger: On<Pointer<Cancel>>,
     mut track_q: Query<(&Children, &mut Node, &mut Slider, Option<&MouseDrag>)>,
     mut commands: Commands,
 ) {
-    let track_e = trigger.target();
+    let track_e = trigger.observer();
     handle_drag_finish_like(track_e, &mut track_q, &mut commands, None);
 }
 
@@ -437,7 +437,7 @@ fn tick_slide_anim(
 }
 
 fn handle_window_resize(
-    mut eview_width: EventReader<WindowResized>,
+    mut eview_width: MessageReader<WindowResized>,
     mut q: Query<
         (
             Entity,
