@@ -2,7 +2,7 @@ use bevy::color::palettes::css;
 use bevy::math::curve::easing::EaseFunction;
 use bevy::picking::prelude::*;
 use bevy::prelude::*;
-use bevy::ui::{BackgroundColor, Node, Overflow, OverflowAxis};
+use bevy::ui::{BackgroundColor, Node, Overflow, OverflowAxis, ZIndex};
 use bevy::window::WindowResized;
 
 // Tunables
@@ -181,6 +181,73 @@ fn setup(mut commands: Commands, windows: Query<&Window>) {
             ));
         });
     }
+
+    // Bottom nav bar
+    let nav_bar = commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                bottom: Val::Px(16.0),
+                left: Val::Percent(0.0),
+                width: Val::Percent(100.0),
+                height: Val::Px(60.0),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                column_gap: Val::Px(16.0),
+                ..default()
+            },
+            BackgroundColor(Color::NONE),
+            ZIndex(1),
+        ))
+        .id();
+
+    let btn_node = Node {
+        width: Val::Px(140.0),
+        height: Val::Px(44.0),
+        justify_content: JustifyContent::Center,
+        align_items: AlignItems::Center,
+        ..default()
+    };
+
+    commands.entity(root).add_child(nav_bar);
+    commands.entity(nav_bar).with_children(|p| {
+        p.spawn((
+            Button,
+            btn_node.clone(),
+            BackgroundColor(Color::srgba(0.2, 0.2, 0.25, 0.9)),
+            Pickable::default(),
+        ))
+        .observe(on_prev_click);
+        p.spawn((
+            Button,
+            btn_node,
+            BackgroundColor(Color::srgba(0.2, 0.2, 0.25, 0.9)),
+            Pickable::default(),
+        ))
+        .observe(on_next_click);
+    });
+}
+
+// Observer: previous button clicked
+fn on_prev_click(
+    _trigger: Trigger<Pointer<Click>>,
+    mut track_q: Query<(&mut Slider, Option<&SlideAnim>), With<PageTrack>>,
+) {
+    let Ok((mut slider, _anim)) = track_q.single_mut() else {
+        return;
+    };
+    slider.pending_steps -= 1;
+}
+
+// Observer: next button clicked
+fn on_next_click(
+    _trigger: Trigger<Pointer<Click>>,
+    mut track_q: Query<(&mut Slider, Option<&SlideAnim>), With<PageTrack>>,
+) {
+    let Ok((mut slider, _anim)) = track_q.single_mut() else {
+        return;
+    };
+    slider.pending_steps += 1;
 }
 
 fn keyboard_nav(
