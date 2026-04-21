@@ -2,6 +2,7 @@
 name = "bevy_ui_carousel"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
 
 [dependencies]
 bevy = { version = "0.17", features = [
